@@ -1,5 +1,5 @@
 # bot.py
-# Full Club Auction Bot (Certified Final Production Build v2.1)
+# Full Club Auction Bot (Certified Final Production Build v2.2)
 # Dependencies: discord.py, fastapi, uvicorn, jinja2, pymongo, dnspython, certifi
 
 import os
@@ -119,14 +119,10 @@ LOSER_REACTIONS = [
     1443996139362844783, 1443996248871928090
 ]
 
-# Donor Weights for Giveaways
+# Donor Weights
 DONOR_WEIGHTS = {
-    972809181444861984: 1,
-    972809182224994354: 1,
-    972809183374225478: 2,
-    972809180966703176: 2,
-    972809183718150144: 4,
-    972809184242434048: 8,
+    972809181444861984: 1, 972809182224994354: 1, 972809183374225478: 2,
+    972809180966703176: 2, 972809183718150144: 4, 972809184242434048: 8,
     973502021757968414: 12
 }
 
@@ -191,15 +187,11 @@ class HumanInt(commands.Converter):
     async def convert(self, ctx, argument):
         try:
             clean = argument.lower().replace(",", "").replace("$", "")
-            if "k" in clean:
-                return int(float(clean.replace("k", "")) * 1000)
-            if "m" in clean:
-                return int(float(clean.replace("m", "")) * 1000000)
-            if "b" in clean:
-                return int(float(clean.replace("b", "")) * 1000000000)
+            if "k" in clean: return int(float(clean.replace("k", "")) * 1000)
+            if "m" in clean: return int(float(clean.replace("m", "")) * 1000000)
+            if "b" in clean: return int(float(clean.replace("b", "")) * 1000000000)
             return int(clean)
-        except:
-            raise commands.BadArgument(f"Invalid number: {argument}")
+        except: raise commands.BadArgument(f"Invalid number: {argument}")
 
 class Paginator(View):
     def __init__(self, ctx, data, title, color, per_page=10):
@@ -221,10 +213,8 @@ class Paginator(View):
         start = self.current_page * self.per_page
         end = start + self.per_page
         page_data = self.data[start:end]
-        
         embed = discord.Embed(title=f"{self.title} ({self.current_page + 1}/{self.total_pages})", color=self.color)
-        for name, value in page_data:
-            embed.add_field(name=name, value=value, inline=False)
+        for name, value in page_data: embed.add_field(name=name, value=value, inline=False)
         return embed
 
     @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.primary)
@@ -249,37 +239,27 @@ class ParticipantView(discord.ui.View):
 
     @discord.ui.button(label="Check Participants", style=discord.ButtonStyle.gray, emoji="👀")
     async def check_list(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message(f"{E_ERROR} Admins only.", ephemeral=True)
-
+        if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Admins only.", ephemeral=True)
         message = await interaction.channel.fetch_message(self.message_id)
         reaction = None
         emoji_to_check = "🎉"
         if E_GIVEAWAY.startswith("<"): emoji_to_check = E_GIVEAWAY 
-
         for r in message.reactions:
              if str(r.emoji) == str(emoji_to_check) or str(r.emoji) == "🎉":
                  reaction = r
                  break
-        
         if not reaction: return await interaction.response.send_message("No entries yet.", ephemeral=True)
-
         users = [user async for user in reaction.users() if not user.bot]
         valid_participants = []
-        
         for u in users:
             if isinstance(u, discord.Member):
                 if self.required_roles:
                     user_role_ids = [r.id for r in u.roles]
                     if isinstance(self.required_roles, list): 
-                        if any(rid in self.required_roles for rid in user_role_ids):
-                            valid_participants.append(f"• {u.display_name}") 
+                        if any(rid in self.required_roles for rid in user_role_ids): valid_participants.append(f"• {u.display_name}") 
                     elif isinstance(self.required_roles, int):
-                         if self.required_roles in user_role_ids:
-                             valid_participants.append(f"• {u.display_name}")
-                else:
-                    valid_participants.append(f"• {u.display_name}")
-
+                         if self.required_roles in user_role_ids: valid_participants.append(f"• {u.display_name}")
+                else: valid_participants.append(f"• {u.display_name}")
         count = len(valid_participants)
         text = "\n".join(valid_participants[:40])
         if count > 40: text += f"\n...and {count-40} more."
@@ -292,50 +272,57 @@ class HelpView(discord.ui.View):
 
     async def send_category_embed(self, interaction, title, description, fields, color):
         embed = discord.Embed(title=title, description=description, color=color)
-        for name, val in fields:
-            embed.add_field(name=name, value=val, inline=False)
+        for name, val in fields: embed.add_field(name=name, value=val, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Economy & Groups", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_MONEY))
     async def economy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_MONEY} **Personal Wallet**", f"**Commands:** `.wallet` or `.wl`\n**What is it?** Check your cash balance.\n**Why use it?** See if you can afford items.\n**How:** Type `.wl`"),
-            (f"{E_PREMIUM} **Investment Groups**", f"**Commands:** `.groupinfo` or `.gi`\n**What is it?** A shared bank account for you and your friends.\n**Why use it?** Pool funds to buy expensive clubs together.\n**How:** `.gi <Name>`"),
-            (f"{E_BOOST} **Deposit/Withdraw**", f"**Commands:** `.deposit` / `.withdraw`\n**What is it?** Move money between your wallet and group.\n**How:** `.dep <Group> <Amount>`")
+            (f"{E_MONEY} **Personal Finance**", f"`{.wl}` **Wallet:** Check balance.\n`{.ww <Amt>}` **Withdraw Wallet:** Burn/delete money from wallet."),
+            (f"{E_PREMIUM} **Groups**", f"`{.cg <Name> <%>}` **Create Group:** Start new group.\n`{.jg <Name> <%>}` **Join Group:** Join group.\n`{.gi <Name>}` **Info:** Funds & members.\n`{.gl}` **List:** All groups.\n`{.lg <Name>}` **Leave:** Exit group (10% penalty)."),
+            (f"{E_BOOST} **Banking**", f"`{.dep <Grp> <Amt>}` **Deposit:** Wallet → Group.\n`{.wd <Grp> <Amt>}` **Withdraw:** Group → Wallet.")
         ]
-        await self.send_category_embed(interaction, f"{E_MONEY} Economy Guide", "Manage your finances.", fields, 0x2ecc71)
+        await self.send_category_embed(interaction, f"{E_MONEY} Economy Guide", "Manage finances.", fields, 0x2ecc71)
 
-    @discord.ui.button(label="Football Features", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_FIRE))
+    @discord.ui.button(label="Football & Roles", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_FIRE))
     async def football_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_CROWN} **Club Info**", f"**Commands:** `.clubinfo` or `.ci`\n**What is it?** Full stats for any club (Owner, Value, Wins).\n**Why use it?** Research before buying.\n**How:** `.ci Real Madrid`"),
-            (f"{E_BOOST} **Leaderboards**", f"**Commands:** `.leaderboard` or `.lb`\n**What is it?** Ranking of top clubs.\n**Why use it?** See who is the best manager.\n**How:** `.lb`"),
-            (f"{E_ITEMBOX} **Duelist Registry**", f"**Commands:** `.listduelists` or `.ld`\n**What is it?** List of players available for hire.")
+            (f"{E_CROWN} **Clubs**", f"`{.ci <Club>}` **Info:** Owner, Value, Wins.\n`{.cl <Club>}` **Level:** Division progress.\n`{.lc}` **List:** All clubs.\n`{.lb}` **Leaderboard:** Global ranks."),
+            (f"{E_ITEMBOX} **Duelists**", f"`{.rd <Name> <Price> <Sal>}` **Register:** Join as player.\n`{.ld}` **List:** Available players.\n`{.ret}` **Retire:** Delete profile."),
+            (f"{E_ADMIN} **Owner Tools**", f"`{.as <ID> <Amt>}` **Salary:** Pay bonus/fine.\n`{.ds <ID> yes}` **Deduct:** Fine 15% for miss.")
         ]
-        await self.send_category_embed(interaction, f"{E_STAR} Football Management", "Clubs, Stats & Matches.", fields, 0x3498db)
+        await self.send_category_embed(interaction, f"{E_STAR} Football Features", "Manage clubs & players.", fields, 0x3498db)
 
     @discord.ui.button(label="Market & Buying", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_AUCTION))
     async def market_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_AUCTION} **Market List**", f"**Commands:** `.marketlist` or `.ml`\n**What is it?** Live list of unsold clubs.\n**Why use it?** Buy clubs instantly.\n**How:** `.ml`"),
-            (f"{E_MONEY} **Buy Club**", f"**Commands:** `.buyclub` or `.bc`\n**What is it?** Request to buy a club with your funds.\n**Note:** Requires Admin Approval. Refunded if rejected.\n**How:** `.bc <ClubName>`"),
-            (f"{E_TIMER} **Auctions**", f"**Commands:** `.placebid` or `.pb`\n**What is it?** Bid on rare items.\n**How:** `.pb <Amount> <Type> <ID>`")
+            (f"{E_AUCTION} **Trading**", f"`{.ml}` **Market List:** Unsold clubs.\n`{.bc <Club>}` **Buy Club:** Request purchase (User).\n`{.gbc <Grp> <Club>}` **Group Buy:** Request purchase (Group).\n`{.sc <Club>}` **Sell:** To Market or User.\n`{.ss <Club> <User> <%>}` **Shares:** Sell Group %."),
+            (f"{E_TIMER} **Auctions**", f"`{.pb <Amt> <Type> <ID>}` **Bid:** Place bid.\n`{.gb <Grp> <Amt> <Type> <ID>}` **Group Bid:** Bid with group funds."),
+            (f"{E_STARS} **Analysis**", f"`{.mp <Club>}` **Panel:** Financial stats.")
         ]
         await self.send_category_embed(interaction, f"{E_AUCTION} Transfer Market", "Buy, Sell & Trade.", fields, 0xe67e22)
 
-    @discord.ui.button(label="Giveaways", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_GIVEAWAY))
-    async def giveaway_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Admin Tools", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ADMIN))
+    async def admin_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
         fields = [
-            (f"{E_GIVEAWAY} **How to Enter**", f"React with 🎉 on giveaway messages."),
-            (f"{E_BOOST} **Auto-Payouts**", f"Cash prizes are deposited to your wallet instantly."),
-            (f"{E_CROWN} **Donor Perks**", f"Donors get **Multiplier Entries** (e.g., 12x chance) automatically.")
+            (f"{E_ADMIN} **Deals**", f"`{.cd}` **Check:** Pending deals.\n`{.md <ID> <Action>}` **Manage:** Approve/Reject."),
+            (f"{E_AUCTION} **Auctions**", f"`{.rc <Name> <Price>}` **Register Club**\n`{.sca <Club>}` **Start Club Auction**\n`{.sda <ID>}` **Start Duelist Auction**\n`{.fa}`/`{.ufa}` **Freeze/Unfreeze**"),
+            (f"{E_FIRE} **Matches**", f"`{.rb <A> <B>}` **Battle:** Create match.\n`{.br <ID> <Winner>}` **Result:** Log winner."),
+            (f"{E_MONEY} **Economy**", f"`{.tp <User> <Amt>}` **Tip**\n`{.du <User> <Amt>}` **Deduct**\n`{.agf <Grp> <Amt>}` **Group Fund**\n`{.po <User> <Amt>}` **Payout**"),
+            (f"{E_GIVEAWAY} **Events**", f"`.giveaway_donor` / `.giveaway_daily` / `.giveaway_shiny`")
         ]
-        await self.send_category_embed(interaction, f"{E_GIVEAWAY} Giveaway System", "Events & Rewards.", fields, 0xe74c3c)
+        await self.send_category_embed(interaction, f"{E_ADMIN} Staff Commands", "Admin Control Panel.", fields, 0xff0000)
 
-    @discord.ui.button(label="Updates (v2.1)", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_ADMIN))
+    @discord.ui.button(label="Updates (v2.2)", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_BOOST))
     async def updates_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         desc = (
-            f"{E_STARS} **Latest Features**\n{E_GOLD_TICK} **Short Commands:** Use `.bc` instead of `.buyclub`.\n{E_GOLD_TICK} **Human Numbers:** Type `1.5m` instead of `1500000`.\n{E_GOLD_TICK} **Secure Market:** New Approval System for purchases."
+            f"{E_STARS} **Latest Updates**\n"
+            f"{E_GOLD_TICK} **Human Numbers:** Support for `k`, `m`, `b` (e.g., `1.5m`).\n"
+            f"{E_GOLD_TICK} **Short Commands:** Added aliases (e.g., `.bc`, `.pb`).\n"
+            f"{E_GOLD_TICK} **Secure Market:** Buying clubs now requires Admin Approval.\n"
+            f"{E_GOLD_TICK} **Adv. Giveaways:** Donor weights & Auto-tipping.\n"
+            f"{E_GOLD_TICK} **Info Panel:** You are looking at it!"
         )
         await self.send_category_embed(interaction, f"{E_ALERT} Patch Notes", desc, [], 0x9b59b6)
 
@@ -362,10 +349,7 @@ def log_audit(entry: str):
     if db is not None: audit_col.insert_one({"entry": entry, "timestamp": datetime.now()})
 
 def log_user_activity(user_id, type, description):
-    if db is not None:
-        activities_col.insert_one({
-            "user_id": str(user_id), "type": type, "description": description, "timestamp": datetime.now()
-        })
+    if db is not None: activities_col.insert_one({"user_id": str(user_id), "type": type, "description": description, "timestamp": datetime.now()})
 
 async def send_log(channel_key, embed):
     if db is None: return
@@ -429,9 +413,7 @@ def update_club_level(club_id, wins_gained=0):
     return None
 
 def log_past_entity(user_id, type, name):
-    past_entities_col.insert_one({
-        "user_id": str(user_id), "type": type, "name": name, "timestamp": datetime.now()
-    })
+    past_entities_col.insert_one({"user_id": str(user_id), "type": type, "name": name, "timestamp": datetime.now()})
 
 def parse_duration(time_str):
     time_str = time_str.lower()
@@ -471,7 +453,6 @@ async def finalize_auction(item_type: str, item_id: int, channel_id: int):
     if winner_bid:
         bidder_str = winner_bid["bidder"]
         amount = int(winner_bid["amount"])
-        
         if bidder_str.startswith('group:'):
             gname = bidder_str.replace('group:', '').lower()
             groups_col.update_one({"name": gname}, {"$inc": {"funds": -amount}})
@@ -484,16 +465,11 @@ async def finalize_auction(item_type: str, item_id: int, channel_id: int):
             if old_owner and not old_owner.startswith("group:"):
                 profiles_col.update_one({"user_id": old_owner}, {"$unset": {"owned_club_id": "", "owned_club_share": ""}})
                 log_past_entity(old_owner, "ex_owner", club_item["name"])
-
             history_col.insert_one({"club_id": int(item_id), "winner": bidder_str, "amount": amount, "timestamp": datetime.now(), "market_value_at_sale": club_item.get("value", 0)})
-            clubs_col.update_one({"id": int(item_id)}, {
-                "$set": { "owner_id": bidder_str, "last_bid_price": amount, "value": amount, "ex_owner_id": old_owner }
-            })
-            
+            clubs_col.update_one({"id": int(item_id)}, {"$set": { "owner_id": bidder_str, "last_bid_price": amount, "value": amount, "ex_owner_id": old_owner }})
             if not bidder_str.startswith('group:'):
                 profiles_col.update_one({"user_id": bidder_str}, {"$set": {"owned_club_id": int(item_id), "owned_club_share": 100}}, upsert=True)
                 log_user_activity(bidder_str, "Win", f"Won Auction for Club {club_item['name']}")
-            
             if channel:
                 await channel.send(embed=create_embed(f"{E_GIVEAWAY} AUCTION SOLD", f"{E_SUCCESS} **New Owner:** {bidder_str}\n{E_ITEMBOX} **Club:** {club_item['name']}\n{E_MONEY} **Final Price:** ${amount:,}\n{E_STARS} **New Market Value:** ${amount:,}", 0xf1c40f, thumbnail=club_item.get("logo")))
         else: 
@@ -515,7 +491,6 @@ async def finalize_auction(item_type: str, item_id: int, channel_id: int):
                  await channel.send(embed=create_embed(f"{E_GIVEAWAY} DUELIST SIGNED", f"{E_SUCCESS} **Signed To:** {bidder_str}\n{E_ITEMBOX} **Player:** {d_item['username']}\n{E_MONEY} **Transfer Fee:** ${amount:,}", 0x9b59b6, thumbnail=d_item.get('avatar_url')))
     else:
         if channel: await channel.send(embed=create_embed(f"{E_TIMER} Auction Ended", "No bids were placed.", color=0x95a5a6))
-    
     bids_col.delete_many({"item_type": item_type, "item_id": int(item_id)})
     active_timers.pop((item_type, str(item_id)), None)
 
@@ -534,10 +509,10 @@ async def on_command_completion(ctx):
     log_user_activity(ctx.author.id, "Command", f"Used {E_CHAT} `.{ctx.command.name}`")
 
 # ===========================
-#   GROUP 1: USER & ECONOMY
+#   GROUP 1: ECONOMY
 # ===========================
 
-@bot.hybrid_command(name="playerhistory", aliases=["ph"], description="Admin: View full user history.")
+@bot.hybrid_command(name="playerhistory", aliases=["ph"], description="Admin: View user history.")
 @commands.has_permissions(administrator=True)
 async def playerhistory(ctx, user: discord.Member):
     uid = str(user.id)
@@ -699,7 +674,7 @@ async def leavegroup(ctx, name: str):
     await ctx.send(embed=create_embed(f"{E_DANGER} Left Group", f"Left **{name}**. Penalty: **${penalty:,}**.", 0xff0000))
 
 # ===========================
-#   GROUP 2: MARKET & BIDS
+#   GROUP 2: MARKET
 # ===========================
 
 @bot.hybrid_command(name="placebid", aliases=["pb"], description="Place a bid.")
@@ -719,7 +694,6 @@ async def placebid(ctx, amount: HumanInt, item_type: str, item_id: int, club_nam
             gname = c.get("owner_id").replace("group:", "")
             if group_members_col.find_one({"group_name": gname, "user_id": str(ctx.author.id)}): allowed = True
         if not allowed: return await ctx.send(embed=create_embed("Error", "You/Group don't own this club.", 0xff0000))
-    
     if item_type == "club":
          c = clubs_col.find_one({"id": int(item_id)})
          if not c: return await ctx.send(embed=create_embed("Error", "Club not found.", 0xff0000))
@@ -727,7 +701,6 @@ async def placebid(ctx, amount: HumanInt, item_type: str, item_id: int, club_nam
          if c.get("owner_id") and not is_active: return await ctx.send(embed=create_embed("Sold Out", f"{E_ERROR} This club is **SOLD OUT**. Wait for owner to sell.", 0xff0000))
          prof = profiles_col.find_one({"user_id": str(ctx.author.id)})
          if prof and prof.get("owned_club_id"): return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You already own a club (100%). Sell it first.", 0xff0000))
-    
     w = wallets_col.find_one({"user_id": str(ctx.author.id)})
     if not w or w.get("balance", 0) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient funds.", 0xff0000))
     req = min_required_bid(get_current_bid(item_type, item_id))
@@ -744,13 +717,11 @@ async def groupbid(ctx, group_name: str, amount: HumanInt, item_type: str, item_
     g = groups_col.find_one({"name": gname})
     if not g: return await ctx.send(embed=create_embed("Error", "Group not found.", 0xff0000))
     if not group_members_col.find_one({"group_name": gname, "user_id": str(ctx.author.id)}): return await ctx.send(embed=create_embed("Error", "Not member.", 0xff0000))
-    
     if item_type == "club":
          c = clubs_col.find_one({"id": int(item_id)})
          is_active = (item_type, str(item_id)) in active_timers
          if c.get("owner_id") and not is_active: return await ctx.send(embed=create_embed(f"{E_ALERT} Sold Out", f"{E_ERROR} This club is **SOLD OUT**.", 0xff0000))
          if clubs_col.find_one({"owner_id": f"group:{gname}"}): return await ctx.send(embed=create_embed("Error", "Group already owns a club.", 0xff0000))
-
     if item_type == "duelist":
         d = duelists_col.find_one({"id": int(item_id)})
         is_active = (item_type, str(item_id)) in active_timers
@@ -758,7 +729,6 @@ async def groupbid(ctx, group_name: str, amount: HumanInt, item_type: str, item_
         if not club_name: return await ctx.send(embed=create_embed("Error", "Provide club name.", 0xff0000))
         c = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
         if not c or c.get("owner_id") != f"group:{gname}": return await ctx.send(embed=create_embed("Error", "Group doesn't own club.", 0xff0000))
-        
     if g["funds"] < amount: return await ctx.send(embed=create_embed("Error", "Insufficient funds.", 0xff0000))
     bids_col.insert_one({"bidder": f"group:{gname}", "amount": amount, "item_type": item_type, "item_id": int(item_id)})
     log_user_activity(ctx.author.id, "Bid", f"Group bid ${amount:,} on {item_type} {item_id}")
@@ -780,7 +750,6 @@ async def sellclub(ctx, club_name: str, buyer: discord.Member = None):
     if old_owner:
         profiles_col.update_one({"user_id": old_owner}, {"$unset": {"owned_club_id": "", "owned_club_share": ""}})
         log_past_entity(old_owner, "ex_owner", c['name'])
-
     if buyer:
         bw = wallets_col.find_one({"user_id": str(buyer.id)})
         if not bw or bw.get("balance", 0) < val: return await ctx.send(embed=create_embed("Error", "Buyer broke.", 0xff0000))
@@ -789,7 +758,6 @@ async def sellclub(ctx, club_name: str, buyer: discord.Member = None):
         profiles_col.update_one({"user_id": str(buyer.id)}, {"$set": {"owned_club_id": c["id"], "owned_club_share": 100}}, upsert=True)
     else:
         clubs_col.update_one({"id": c["id"]}, {"$set": {"owner_id": None, "ex_owner_id": old_owner}})
-        
     wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": val}}, upsert=True)
     embed_log = create_embed(f"{E_ADMIN} Club Sold", f"**Club:** {c['name']}\n**Seller:** {ctx.author.mention}\n**Buyer:** {target.mention if buyer else 'Market'}\n**Price:** ${val:,}", 0xe67e22)
     await send_log("club", embed_log)
@@ -824,8 +792,7 @@ async def marketlist(ctx):
     unsold_clubs = list(clubs_col.find({"$or": [{"owner_id": None}, {"owner_id": ""}]}).sort("value", -1))
     if not unsold_clubs: return await ctx.send(embed=create_embed(f"{E_AUCTION} Market Empty", "All clubs are currently owned.", 0x95a5a6))
     data = []
-    for c in unsold_clubs:
-        data.append((f"{E_STAR} {c['name']}", f"{E_MONEY} **Price:** ${c['value']:,}\n{E_BOOST} **Division:** {c.get('level_name', 'Unknown')}\n{E_ITEMBOX} **ID:** {c['id']}"))
+    for c in unsold_clubs: data.append((f"{E_STAR} {c['name']}", f"{E_MONEY} **Price:** ${c['value']:,}\n{E_BOOST} **Division:** {c.get('level_name', 'Unknown')}\n{E_ITEMBOX} **ID:** {c['id']}"))
     view = Paginator(ctx, data, f"{E_AUCTION} Transfer Market", 0xe67e22, 10)
     await ctx.send(embed=view.get_embed(), view=view)
 
@@ -887,7 +854,6 @@ async def managedeal(ctx, deal_id: int, action: str):
     c = clubs_col.find_one({"id": deal['club_id']})
     buyer_id = deal['buyer_id']
     price = deal['price']
-
     if action == "reject":
         if deal['type'] == "group":
             gname = buyer_id.replace("group:", "")
@@ -905,7 +871,6 @@ async def managedeal(ctx, deal_id: int, action: str):
         pending_deals_col.delete_one({"id": deal_id})
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Rejected", f"Deal #{deal_id} rejected. Funds refunded.", 0x2ecc71))
         return
-
     if action == "approve":
         if c.get("owner_id"):
             if deal['type'] == "group": groups_col.update_one({"name": buyer_id.replace("group:", "")}, {"$inc": {"funds": price}})
@@ -923,6 +888,24 @@ async def managedeal(ctx, deal_id: int, action: str):
         await send_log("club", log_embed)
         pending_deals_col.delete_one({"id": deal_id})
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Approved", f"Deal #{deal_id} approved. Ownership transferred.", 0x2ecc71))
+
+@bot.hybrid_command(name="marketpanel", aliases=["mp"], description="View market stats.")
+async def marketpanel(ctx, *, club_name_or_id: str):
+    try: c = clubs_col.find_one({"id": int(club_name_or_id)})
+    except: c = clubs_col.find_one({"name": {"$regex": f"^{club_name_or_id}$", "$options": "i"}})
+    if not c: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
+    cur_lvl, nxt_lvl, req_wins = get_level_info(c.get('total_wins', 0), c.get('level_name'))
+    embed = discord.Embed(title=f"{E_STARS} Market Panel: {c['name']}", color=0xf1c40f)
+    if c.get("logo"): embed.set_thumbnail(url=c["logo"])
+    embed.add_field(name="Market Value", value=f"{E_MONEY} **${c['value']:,}**", inline=True)
+    embed.add_field(name="Total Wins", value=f"{E_FIRE} **{c.get('total_wins', 0)}**", inline=True)
+    embed.add_field(name="Division", value=f"{E_CROWN} **{cur_lvl}**", inline=False)
+    if nxt_lvl: embed.add_field(name="Next", value=f"{E_ARROW} **{nxt_lvl[0]}** (Req: {req_wins} wins)", inline=True)
+    else: embed.add_field(name="Status", value=f"{E_GOLD_TICK} Max Level", inline=False)
+    await ctx.send(embed=embed)
+# ===========================
+#   GROUP 3: FOOTBALL
+# ===========================
 
 @bot.hybrid_command(name="listclubs", aliases=["lc"], description="List all registered clubs.")
 async def listclubs(ctx):
@@ -970,6 +953,17 @@ async def clubinfo(ctx, *, club_name_or_id: str):
     embed.add_field(name=f"{E_ITEMBOX} Duelists", value=d_list, inline=False)
     await ctx.send(embed=embed)
 
+@bot.hybrid_command(name="clublevel", aliases=["cl"], description="Check club level.")
+async def clublevel(ctx, *, club_name_or_id: str):
+    try: c = clubs_col.find_one({"id": int(club_name_or_id)})
+    except: c = clubs_col.find_one({"name": {"$regex": f"^{club_name_or_id}$", "$options": "i"}})
+    if not c: return await ctx.send(embed=create_embed("Error", "Club not found.", 0xff0000))
+    cur, nxt, req = get_level_info(c.get('total_wins', 0), c.get('level_name'))
+    embed = create_embed(f"{E_BOOST} Club Level", f"**{c['name']}**\n{E_CROWN} Current: **{cur}**\n{E_FIRE} Wins: **{c.get('total_wins',0)}**", 0xf1c40f)
+    if nxt: embed.add_field(name="Next Level", value=f"{E_ARROW} **{nxt[0]}**\n{E_RED_ARROW} Needs **{req}** wins")
+    else: embed.add_field(name="Status", value=f"{E_GOLD_TICK} Max Level")
+    await ctx.send(embed=embed)
+
 @bot.hybrid_command(name="leaderboard", aliases=["lb"], description="View top clubs.")
 async def leaderboard(ctx):
     clubs = list(clubs_col.find().sort([("total_wins", -1), ("value", -1)]))
@@ -978,10 +972,6 @@ async def leaderboard(ctx):
     view = Paginator(ctx, data, f"{E_CROWN} Club Leaderboard", 0xf1c40f, 10)
     await ctx.send(embed=view.get_embed(), view=view)
 
-# ===========================
-#   GROUP 3: DUELIST
-# ===========================
-
 @bot.hybrid_command(name="registerduelist", aliases=["rd"], description="Register as duelist.")
 async def registerduelist(ctx, username: str, base_price: HumanInt, salary: HumanInt):
     if duelists_col.find_one({"discord_user_id": str(ctx.author.id)}): return await ctx.send(embed=create_embed("Error", "Already registered.", 0xff0000))
@@ -989,6 +979,32 @@ async def registerduelist(ctx, username: str, base_price: HumanInt, salary: Huma
     avatar = ctx.author.avatar.url if ctx.author.avatar else ""
     duelists_col.insert_one({"id": did, "discord_user_id": str(ctx.author.id), "username": username, "base_price": base_price, "expected_salary": salary, "avatar_url": avatar, "owned_by": None, "club_id": None})
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Registered", f"Duelist **{username}** (ID: {did})", 0x9b59b6))
+
+@bot.hybrid_command(name="retireduelist", aliases=["ret"], description="Retire a duelist.")
+async def retireduelist(ctx, member: discord.Member = None):
+    target_id = str(member.id) if member else str(ctx.author.id)
+    d = duelists_col.find_one({"discord_user_id": target_id})
+    if not d: return await ctx.send(embed=create_embed("Error", "Not a duelist.", 0xff0000))
+    if member:
+        if not d.get("club_id"): return await ctx.send(embed=create_embed("Error", "Free agent must self-retire.", 0xff0000))
+        c = clubs_col.find_one({"id": d["club_id"]})
+        owner_str, owner_ids = get_club_owner_info(c["id"])
+        if str(ctx.author.id) not in owner_ids: return await ctx.send(embed=create_embed("Error", "Not owner.", 0xff0000))
+        await ctx.send(embed=create_embed(f"{E_ALERT} Confirm", f"Owner {ctx.author.mention}, retire {member.mention}? `yes`/`no`", 0xe67e22))
+        try: msg = await bot.wait_for('message', check=lambda m: m.author==ctx.author and m.content.lower() in ['yes','no'], timeout=30)
+        except: return
+        if msg.content.lower() == 'no': return
+        await ctx.send(embed=create_embed(f"{E_ALERT} Confirm", f"Duelist {member.mention}, confirm retirement? `yes`/`no`", 0xe67e22))
+        try: msg2 = await bot.wait_for('message', check=lambda m: m.author==member and m.content.lower() in ['yes','no'], timeout=30)
+        except: return
+        if msg2.content.lower() == 'no': return
+    else:
+        if d.get("owned_by"): return await ctx.send(embed=create_embed("Error", "You are signed. Ask owner.", 0xff0000))
+    duelists_col.delete_one({"_id": d["_id"]})
+    embed_log = create_embed(f"{E_DANGER} Duelist Retired", f"**Player:** {d['username']}\n**ID:** {d['id']}", 0xff0000)
+    await send_log("duelist", embed_log)
+    log_user_activity(target_id, "Duelist", "Retired")
+    await ctx.send(embed=create_embed(f"{E_DANGER} Retired", f"Duelist **{d['username']}** retired.", 0xff0000))
 
 @bot.hybrid_command(name="listduelists", aliases=["ld"], description="List duelists.")
 async def listduelists(ctx):
@@ -1024,6 +1040,20 @@ async def adjustsalary(ctx, duelist_id: int, amount: HumanInt):
         log_user_activity(ctx.author.id, "Transaction", f"Fined {d['username']} ${abs_amt:,}")
         await ctx.send(embed=create_embed(f"{E_DANGER} Fine", f"Deducted **${abs_amt:,}** from {d['username']}.", 0xff0000))
 
+@bot.hybrid_command(name="deductsalary", aliases=["ds"], description="Owner: Deduct salary.")
+async def deductsalary(ctx, duelist_id: int, confirm: str):
+    if confirm.lower() != "yes": return
+    d = duelists_col.find_one({"id": int(duelist_id)})
+    if not d: return await ctx.send(embed=create_embed("Error", "Duelist not found.", 0xff0000))
+    if not d.get('club_id'): return await ctx.send(embed=create_embed("Error", "Duelist not in a club.", 0xff0000))
+    owner_str, owner_ids = get_club_owner_info(d['club_id'])
+    if str(ctx.author.id) not in owner_ids and not ctx.author.guild_permissions.administrator: return await ctx.send(embed=create_embed("Error", "Not authorized.", 0xff0000))
+    penalty = int(d["expected_salary"] * (DUELIST_MISS_PENALTY_PERCENT / 100))
+    wallets_col.update_one({"user_id": d["discord_user_id"]}, {"$inc": {"balance": -penalty}}, upsert=True)
+    wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": penalty}}, upsert=True)
+    log_user_activity(d["discord_user_id"], "Penalty", f"Fined ${penalty:,} for missed match.")
+    await ctx.send(embed=create_embed(f"{E_ALERT} Penalty", f"Fined **${penalty:,}** from **{d['username']}**'s wallet.", 0xff0000))
+
 # ===========================
 #   GROUP 4: ADMIN
 # ===========================
@@ -1054,6 +1084,22 @@ async def startduelistauction(ctx, duelist_id: int):
     bids_col.delete_many({"item_type": "duelist", "item_id": d["id"]})
     await ctx.send(embed=create_embed(f"{E_AUCTION} Duelist Auction", f"{E_ARROW} **Player:** {d['username']}\n{E_MONEY} **Base:** ${d['base_price']:,}", 0x9b59b6, thumbnail=d.get('avatar_url')))
     schedule_auction_timer("duelist", d["id"], ctx.channel.id)
+
+@bot.hybrid_command(name="deleteclub", aliases=["dc"], description="Admin: Delete club.")
+@commands.has_permissions(administrator=True)
+async def deleteclub(ctx, club_name: str):
+    c = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    if not c: return await ctx.send(embed=create_embed("Error", "Club not found.", 0xff0000))
+    clubs_col.delete_one({"id": c['id']})
+    history_col.delete_many({"club_id": c['id']})
+    duelists_col.update_many({"club_id": c['id']}, {"$set": {"club_id": None, "owned_by": None}})
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Deleted", f"Club **{club_name}** removed.", 0xff0000))
+
+@bot.hybrid_command(name="setprefix", aliases=["sp"], description="Admin: Change prefix.")
+@commands.has_permissions(administrator=True)
+async def setprefix(ctx, new_prefix: str):
+    config_col.update_one({"key": "prefix"}, {"$set": {"value": new_prefix}}, upsert=True)
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Prefix Updated", f"New prefix: **`{new_prefix}`**", 0x2ecc71))
 
 @bot.hybrid_command(name="registerbattle", aliases=["rb"], description="Admin: Create match.")
 @commands.has_permissions(administrator=True)
@@ -1086,6 +1132,43 @@ async def battleresult(ctx, battle_id: int, winner_name: str):
     await send_log("battle", embed_log)
     await ctx.send(embed=embed_log)
 
+@bot.hybrid_command(name="checkclubmessages", description="Admin: Activity bonus.")
+@commands.has_permissions(administrator=True)
+async def checkclubmessages(ctx, club_name: str, count: int):
+    c = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    if not c: return await ctx.send(embed=create_embed("Error", "Club not found.", 0xff0000))
+    bonus = (count // OWNER_MSG_COUNT_PER_BONUS) * OWNER_MSG_VALUE_BONUS
+    if bonus > 0:
+        clubs_col.update_one({"id": c['id']}, {"$inc": {"value": bonus}})
+        await ctx.send(embed=create_embed(f"{E_BOOST} Activity Bonus", f"**{c['name']}** value increased by **${bonus:,}**.", 0x2ecc71))
+    else: await ctx.send(embed=create_embed("Info", "Not enough messages.", 0x95a5a6))
+
+@bot.hybrid_command(name="adjustgroupfunds", aliases=["agf"], description="Admin: Cheat funds.")
+@commands.has_permissions(administrator=True)
+async def adjustgroupfunds(ctx, group_name: str, amount: HumanInt):
+    groups_col.update_one({"name": group_name.lower()}, {"$inc": {"funds": amount}})
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Funds Adjusted", f"Adjusted **{group_name}** by ${amount:,}.", 0xe67e22))
+
+@bot.hybrid_command(name="auditlog", description="Owner: View logs.")
+async def auditlog(ctx, lines: int = 10):
+    logs = list(audit_col.find().sort("timestamp", -1).limit(lines))
+    txt = "\n".join([f"[{l['timestamp'].strftime('%H:%M')}] {l['entry']}" for l in logs])
+    await ctx.send(f"```{txt}```")
+
+@bot.hybrid_command(name="resetauction", description="Owner: Clear bids.")
+async def resetauction(ctx):
+    bids_col.delete_many({})
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Reset", "Bids cleared.", 0x2ecc71))
+
+@bot.hybrid_command(name="transferclub", aliases=["tc"], description="Admin: Transfer club.")
+@commands.has_permissions(administrator=True)
+async def transferclub(ctx, old_grp: str, new_grp: str):
+    c = clubs_col.find_one({"owner_id": f"group:{old_grp.lower()}"})
+    if c:
+        clubs_col.update_one({"id": c['id']}, {"$set": {"owner_id": f"group:{new_grp.lower()}"}})
+        await ctx.send(embed=create_embed(f"{E_ADMIN} Transferred", f"Club transferred to {new_grp}.", 0xe67e22))
+    else: await ctx.send(embed=create_embed("Error", "No club found.", 0xff0000))
+
 @bot.hybrid_command(name="tip", aliases=["tp"], description="Admin: Add money to user.")
 @commands.has_permissions(administrator=True)
 async def tip(ctx, member: discord.Member, amount: HumanInt):
@@ -1100,11 +1183,18 @@ async def deduct_user(ctx, member: discord.Member, amount: HumanInt):
     log_user_activity(member.id, "Transaction", f"Deducted ${amount:,}")
     await ctx.send(embed=create_embed(f"{E_ADMIN} Admin Deduct", f"Removed **${amount:,}** from {member.mention}.", 0xff0000))
 
-@bot.hybrid_command(name="adjustgroupfunds", aliases=["agf"], description="Admin: Cheat funds.")
+@bot.hybrid_command(name="setclubmanager", aliases=["scm"], description="Admin: Set manager.")
 @commands.has_permissions(administrator=True)
-async def adjustgroupfunds(ctx, group_name: str, amount: HumanInt):
-    groups_col.update_one({"name": group_name.lower()}, {"$inc": {"funds": amount}})
-    await ctx.send(embed=create_embed(f"{E_ADMIN} Funds Adjusted", f"Adjusted **{group_name}** by ${amount:,}.", 0xe67e22))
+async def setclubmanager(ctx, club_name: str, member: discord.Member):
+    clubs_col.update_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}}, {"$set": {"manager_id": str(member.id)}})
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Manager Set", f"{member.mention} is now manager of {club_name}.", 0x2ecc71))
+
+@bot.hybrid_command(name="logpayment", aliases=["lp"], description="Admin: Log payment.")
+@commands.has_permissions(administrator=True)
+async def logpayment(ctx, user: discord.Member, amount: HumanInt, *, reason: str):
+    embed = create_embed(f"{E_ADMIN} Payment Log", f"**From:** {ctx.author.mention}\n**To:** {user.mention}\n**Amount:** ${amount:,}\n**Reason:** {reason}\n**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0x9b59b6)
+    await send_log("withdraw", embed)
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Logged", "Logged.", 0x2ecc71))
 
 @bot.hybrid_command(name="admin_reset_all", description="Owner: Reset EVERYTHING.")
 @commands.has_permissions(administrator=True)
@@ -1117,6 +1207,27 @@ async def admin_reset_all(ctx):
     profiles_col.update_many({}, {"$unset": {"owned_club_id": "", "owned_club_share": ""}})
     duelists_col.update_many({}, {"$set": {"owned_by": None, "club_id": None}})
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Reset", "System Reset Complete.", 0x2ecc71))
+
+@bot.hybrid_command(name="forcewinner", aliases=["fw"], description="Owner: Force win.")
+@commands.has_permissions(administrator=True)
+async def forcewinner(ctx, item_type: str, item_id: int, winner_str: str, amount: HumanInt):
+    bids_col.insert_one({"bidder": winner_str, "amount": amount, "item_type": item_type, "item_id": int(item_id)})
+    await finalize_auction(item_type, int(item_id), ctx.channel.id)
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Force Win", f"Forced winner **{winner_str}**.", 0xe67e22))
+
+@bot.hybrid_command(name="freezeauction", aliases=["fa"], description="Owner: Freeze auctions.")
+@commands.has_permissions(administrator=True)
+async def freezeauction(ctx):
+    global bidding_frozen
+    bidding_frozen = True
+    await ctx.send(embed=create_embed(f"{E_DANGER} Frozen", "Auctions frozen.", 0xff0000))
+
+@bot.hybrid_command(name="unfreezeauction", aliases=["ufa"], description="Owner: Resume auctions.")
+@commands.has_permissions(administrator=True)
+async def unfreezeauction(ctx):
+    global bidding_frozen
+    bidding_frozen = False
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Unfrozen", "Auctions resumed.", 0x2ecc71))
 
 # ===========================
 #   GROUP 5: GIVEAWAYS
@@ -1224,7 +1335,7 @@ async def giveaway_shiny(ctx, prize: str, winners: int, duration: str, required_
     await run_giveaway(ctx, prize, winners, seconds, full_desc, required_role_ids=role_id, weighted=False, image_url=image_url)
 
 # ===========================
-#   GROUP 6: HELP & INFO
+#   GROUP 6: INFO
 # ===========================
 
 @bot.hybrid_command(name="botinfo", aliases=["info", "guide"], description="Open help panel.")
@@ -1246,7 +1357,7 @@ async def botinfo(ctx):
         color=0xf1c40f
     )
     if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
-    embed.add_field(name=f"{E_BOOK} **Navigation**", value="Click the buttons below to view commands.", inline=False)
+    embed.add_field(name=f"{E_BOOK} **Navigation**", value="Click the buttons below to view the full command list.", inline=False)
     view = HelpView()
     await ctx.send(embed=embed, view=view)
 
@@ -1257,8 +1368,7 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(e)
+    except Exception as e: print(e)
     if not hasattr(bot, 'started'):
         bot.loop.create_task(market_simulation_task())
         bot.started = True
