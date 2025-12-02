@@ -217,7 +217,7 @@ class Paginator(View):
         for name, value in page_data: embed.add_field(name=name, value=value, inline=False)
         return embed
 
-    @discord.ui.button(emoji=⬅️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.primary)
     async def prev_button(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.ctx.author.id: return await interaction.response.send_message("Not your menu.", ephemeral=True)
         self.current_page -= 1
@@ -1425,3 +1425,4 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
