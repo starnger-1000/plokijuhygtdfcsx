@@ -1,5 +1,5 @@
 # bot.py
-# Full Club Auction Bot (Certified Final Production Build v2.2)
+# Full Club Auction Bot (Certified Final Production Build v2.3)
 # Dependencies: discord.py, fastapi, uvicorn, jinja2, pymongo, dnspython, certifi
 
 import os
@@ -237,7 +237,7 @@ class ParticipantView(discord.ui.View):
         self.message_id = message_id
         self.required_roles = required_roles
 
-    @discord.ui.button(label="Check Participants", style=discord.ButtonStyle.gray, emoji="👀")
+    @discord.ui.button(label="Check Participants", style=discord.ButtonStyle.gray, emoji=discord.PartialEmoji.from_str(E_ADMIN))
     async def check_list(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Admins only.", ephemeral=True)
         message = await interaction.channel.fetch_message(self.message_id)
@@ -278,27 +278,27 @@ class HelpView(discord.ui.View):
     @discord.ui.button(label="Economy & Groups", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_MONEY))
     async def economy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_MONEY} **Personal Finance**", f"`{.wl}` **Wallet:** Check balance.\n`{.ww <Amt>}` **Withdraw Wallet:** Burn/delete money from wallet."),
-            (f"{E_PREMIUM} **Groups**", f"`{.cg <Name> <%>}` **Create Group:** Start new group.\n`{.jg <Name> <%>}` **Join Group:** Join group.\n`{.gi <Name>}` **Info:** Funds & members.\n`{.gl}` **List:** All groups.\n`{.lg <Name>}` **Leave:** Exit group (10% penalty)."),
-            (f"{E_BOOST} **Banking**", f"`{.dep <Grp> <Amt>}` **Deposit:** Wallet → Group.\n`{.wd <Grp> <Amt>}` **Withdraw:** Group → Wallet.")
+            (f"{E_MONEY} **Personal Finance**", f"`.wl` **Wallet:** Check balance.\n`.ww <Amt>` **Withdraw Wallet:** Burn/delete money from wallet."),
+            (f"{E_PREMIUM} **Groups**", f"`.cg <Name> <%>` **Create Group:** Start new group.\n`.jg <Name> <%>` **Join Group:** Join group.\n`.gi <Name>` **Info:** Funds & members.\n`.gl` **List:** All groups.\n`.lg <Name>` **Leave:** Exit group (10% penalty)."),
+            (f"{E_BOOST} **Banking**", f"`.dep <Grp> <Amt>` **Deposit:** Wallet → Group.\n`.wd <Grp> <Amt>` **Withdraw:** Group → Wallet.")
         ]
         await self.send_category_embed(interaction, f"{E_MONEY} Economy Guide", "Manage finances.", fields, 0x2ecc71)
 
     @discord.ui.button(label="Football & Roles", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_FIRE))
     async def football_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_CROWN} **Clubs**", f"`{.ci <Club>}` **Info:** Owner, Value, Wins.\n`{.cl <Club>}` **Level:** Division progress.\n`{.lc}` **List:** All clubs.\n`{.lb}` **Leaderboard:** Global ranks."),
-            (f"{E_ITEMBOX} **Duelists**", f"`{.rd <Name> <Price> <Sal>}` **Register:** Join as player.\n`{.ld}` **List:** Available players.\n`{.ret}` **Retire:** Delete profile."),
-            (f"{E_ADMIN} **Owner Tools**", f"`{.as <ID> <Amt>}` **Salary:** Pay bonus/fine.\n`{.ds <ID> yes}` **Deduct:** Fine 15% for miss.")
+            (f"{E_CROWN} **Clubs**", f"`.ci <Club>` **Info:** Owner, Value, Wins.\n`.cl <Club>` **Level:** Division progress.\n`.lc` **List:** All clubs.\n`.lb` **Leaderboard:** Global ranks."),
+            (f"{E_ITEMBOX} **Duelists**", f"`.rd <Name> <Price> <Sal>` **Register:** Join as player.\n`.ld` **List:** Available players.\n`.ret` **Retire:** Delete profile."),
+            (f"{E_ADMIN} **Owner Tools**", f"`.as <ID> <Amt>` **Salary:** Pay bonus/fine.\n`.ds <ID> yes` **Deduct:** Fine 15% for miss.")
         ]
         await self.send_category_embed(interaction, f"{E_STAR} Football Features", "Manage clubs & players.", fields, 0x3498db)
 
     @discord.ui.button(label="Market & Buying", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_AUCTION))
     async def market_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_AUCTION} **Trading**", f"`{.ml}` **Market List:** Unsold clubs.\n`{.bc <Club>}` **Buy Club:** Request purchase (User).\n`{.gbc <Grp> <Club>}` **Group Buy:** Request purchase (Group).\n`{.sc <Club>}` **Sell:** To Market or User.\n`{.ss <Club> <User> <%>}` **Shares:** Sell Group %."),
-            (f"{E_TIMER} **Auctions**", f"`{.pb <Amt> <Type> <ID>}` **Bid:** Place bid.\n`{.gb <Grp> <Amt> <Type> <ID>}` **Group Bid:** Bid with group funds."),
-            (f"{E_STARS} **Analysis**", f"`{.mp <Club>}` **Panel:** Financial stats.")
+            (f"{E_AUCTION} **Trading**", f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>` **Shares:** Sell Group %."),
+            (f"{E_TIMER} **Auctions**", f"`.pb <Amt> <Type> <ID>` **Bid:** Place bid.\n`.gb <Grp> <Amt> <Type> <ID>` **Group Bid:** Bid with group funds."),
+            (f"{E_STARS} **Analysis**", f"`.mp <Club>` **Panel:** Financial stats.")
         ]
         await self.send_category_embed(interaction, f"{E_AUCTION} Transfer Market", "Buy, Sell & Trade.", fields, 0xe67e22)
 
@@ -306,15 +306,15 @@ class HelpView(discord.ui.View):
     async def admin_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
         fields = [
-            (f"{E_ADMIN} **Deals**", f"`{.cd}` **Check:** Pending deals.\n`{.md <ID> <Action>}` **Manage:** Approve/Reject."),
-            (f"{E_AUCTION} **Auctions**", f"`{.rc <Name> <Price>}` **Register Club**\n`{.sca <Club>}` **Start Club Auction**\n`{.sda <ID>}` **Start Duelist Auction**\n`{.fa}`/`{.ufa}` **Freeze/Unfreeze**"),
-            (f"{E_FIRE} **Matches**", f"`{.rb <A> <B>}` **Battle:** Create match.\n`{.br <ID> <Winner>}` **Result:** Log winner."),
-            (f"{E_MONEY} **Economy**", f"`{.tp <User> <Amt>}` **Tip**\n`{.du <User> <Amt>}` **Deduct**\n`{.agf <Grp> <Amt>}` **Group Fund**\n`{.po <User> <Amt>}` **Payout**"),
+            (f"{E_ADMIN} **Deals**", f"`.cd` **Check:** Pending deals.\n`.md <ID> <Action>` **Manage:** Approve/Reject."),
+            (f"{E_AUCTION} **Auctions**", f"`.rc <Name> <Price>` **Register Club**\n`.sca <Club>` **Start Club Auction**\n`.sda <ID>` **Start Duelist Auction**\n`.fa`/`.ufa` **Freeze/Unfreeze**"),
+            (f"{E_FIRE} **Matches**", f"`.rb <A> <B>` **Battle:** Create match.\n`.br <ID> <Winner>` **Result:** Log winner."),
+            (f"{E_MONEY} **Economy**", f"`.tp <User> <Amt>` **Tip**\n`.du <User> <Amt>` **Deduct**\n`.agf <Grp> <Amt>` **Group Fund**\n`.po <User> <Amt>` **Payout**"),
             (f"{E_GIVEAWAY} **Events**", f"`.giveaway_donor` / `.giveaway_daily` / `.giveaway_shiny`")
         ]
         await self.send_category_embed(interaction, f"{E_ADMIN} Staff Commands", "Admin Control Panel.", fields, 0xff0000)
 
-    @discord.ui.button(label="Updates (v2.2)", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_BOOST))
+    @discord.ui.button(label="Updates (v2.3)", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_BOOST))
     async def updates_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         desc = (
             f"{E_STARS} **Latest Updates**\n"
@@ -1383,3 +1383,4 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
