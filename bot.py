@@ -285,6 +285,9 @@ def parse_prize_amount(prize_str):
     return 0
 
 # ---------- BACKGROUND TASKS & EVENTS ----------
+
+
+# ---------- BACKGROUND TASKS ----------
 async def market_simulation_task():
     while True:
         await asyncio.sleep(3600)
@@ -294,6 +297,7 @@ async def market_simulation_task():
                 change = random.uniform(-0.03, 0.03)
                 new_value = int(max(100, base * (1 + change)))
                 clubs_col.update_one({"_id": c["_id"]}, {"$set": {"value": new_value}})
+
 
 @bot.event
 async def on_command_completion(ctx):
@@ -1479,4 +1483,5 @@ async def on_command_error(ctx, error):
     else: print(error)
 
 if __name__ == "__main__":
+
     bot.run(DISCORD_TOKEN)
