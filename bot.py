@@ -1437,7 +1437,7 @@ class HelpView(discord.ui.View):
     async def economy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
             (f"{E_MONEY} **Personal Finance**", 
-             f"`{.wl}` **Wallet:** Check balances.\n"
+             f"`.wl` **Wallet:** Check balances.\n"
              f"`{.ww <Amt>}` **Withdraw Wallet:** Burn/delete money."),
             (f"{E_PREMIUM} **Investment Groups**", 
              f"`{.cg <Name> <%>}` **Create Group**\n"
@@ -1541,3 +1541,4 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
