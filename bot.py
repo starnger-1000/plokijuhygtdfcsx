@@ -1438,7 +1438,7 @@ class HelpView(discord.ui.View):
         fields = [
             (f"{E_MONEY} **Personal Finance**", 
              f"`.wl` **Wallet:** Check balances.\n"
-             f"`{.ww <Amt>}` **Withdraw Wallet:** Burn/delete money."),
+             f"`.ww <Amt>` **Withdraw Wallet:** Burn/delete money."),
             (f"{E_PREMIUM} **Investment Groups**", 
              f"`{.cg <Name> <%>}` **Create Group**\n"
              f"`{.jg <Name> <%>}` **Join Group**\n"
@@ -1541,4 +1541,5 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
