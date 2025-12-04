@@ -1424,7 +1424,7 @@ class HelpView(discord.ui.View):
     @discord.ui.button(label="Club Market", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_AUCTION))
     async def market_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_AUCTION} **Trading**", f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>}` **Shares:** Sell Group %."),
+            (f"{E_AUCTION} **Trading**", f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>` **Shares:** Sell Group %."),
             (f"{E_TIMER} **Auctions**", f"`.pb <Amt> <Type> <ID>` **Bid:** Place bid.\n`.gb <Grp> <Amt> <Type> <ID>` **Group Bid:** Bid with group funds."),
             (f"{E_STARS} **Analysis**", f"`.mp <Club>` **Panel:** Financial stats.")
         ]
@@ -1494,4 +1494,5 @@ async def on_command_error(ctx, error):
     else: print(error)
 
 if __name__ == "__main__":
+
     bot.run(DISCORD_TOKEN)
