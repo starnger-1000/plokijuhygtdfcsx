@@ -1454,17 +1454,17 @@ class HelpView(discord.ui.View):
     @discord.ui.button(label="Football & Roles", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_FIRE))
     async def football_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_CROWN} **Club Stats**", f"`{.ci <Club>}` Info, `{.cl <Club>}` Level, `{.lc}` List, `{.lb}` Leaderboard."),
-            (f"{E_ITEMBOX} **Duelists**", f"`{.rd}` Register, `{.ld}` List, `{.ret}` Retire."),
-            (f"{E_ADMIN} **Owner Tools**", f"`{.as <ID> <Amt>}` Salary, `{.ds <ID> yes}` Deduct.")
+            (f"{E_CROWN} **Club Stats**", f"`.ci <Club>` Info, `.cl <Club>` Level, `.lc` List, `.lb` Leaderboard."),
+            (f"{E_ITEMBOX} **Duelists**", f"`.rd` Register, `.ld` List, `.ret` Retire."),
+            (f"{E_ADMIN} **Owner Tools**", f"`.as <ID> <Amt>` Salary, `.ds <ID> yes` Deduct.")
         ]
         await self.send_category_embed(interaction, f"{E_STAR} Football Features", "Manage clubs.", fields, 0x3498db)
 
     @discord.ui.button(label="Club Market", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_AUCTION))
     async def market_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
-            (f"{E_AUCTION} **Trading**", f"`{.ml}` Market List, `.bc` Buy Club, `.sc` Sell Club."),
-            (f"{E_TIMER} **Auctions**", f"`{.pb}` Place Bid, `.gb` Group Bid.")
+            (f"{E_AUCTION} **Trading**", f"`.ml` Market List, `.bc` Buy Club, `.sc` Sell Club."),
+            (f"{E_TIMER} **Auctions**", f"`.pb` Place Bid, `.gb` Group Bid.")
         ]
         await self.send_category_embed(interaction, f"{E_AUCTION} Club Market", "Trading hub.", fields, 0xe67e22)
 
@@ -1541,6 +1541,7 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
 
 
