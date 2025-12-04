@@ -1446,8 +1446,8 @@ class HelpView(discord.ui.View):
              f"`.gl` **Group List**\n"
              f"`.lg <Name>` **Leave Group**"),
             (f"{E_BOOST} **Banking Actions**", 
-             f"`{.dep <Grp> <Amt>}` **Deposit:** Wallet -> Group\n"
-             f"`{.wd <Grp> <Amt>}` **Withdraw:** Group -> Wallet")
+             f"`.dep <Grp> <Amt>` **Deposit:** Wallet -> Group\n"
+             f"`.wd <Grp> <Amt>` **Withdraw:** Group -> Wallet")
         ]
         await self.send_category_embed(interaction, f"{E_MONEY} Economy & Groups", "Manage finances.", fields, 0x2ecc71)
 
@@ -1541,6 +1541,7 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
 
 
