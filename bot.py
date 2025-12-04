@@ -1440,11 +1440,11 @@ class HelpView(discord.ui.View):
              f"`.wl` **Wallet:** Check balances.\n"
              f"`.ww <Amt>` **Withdraw Wallet:** Burn/delete money."),
             (f"{E_PREMIUM} **Investment Groups**", 
-             f"`{.cg <Name> <%>}` **Create Group**\n"
-             f"`{.jg <Name> <%>}` **Join Group**\n"
-             f"`{.gi <Name>}` **Group Info**\n"
-             f"`{.gl}` **Group List**\n"
-             f"`{.lg <Name>}` **Leave Group**"),
+             f"`.cg <Name> <%>` **Create Group**\n"
+             f"`.jg <Name> <%>` **Join Group**\n"
+             f"`.gi <Name>` **Group Info**\n"
+             f"`.gl` **Group List**\n"
+             f"`.lg <Name>` **Leave Group**"),
             (f"{E_BOOST} **Banking Actions**", 
              f"`{.dep <Grp> <Amt>}` **Deposit:** Wallet -> Group\n"
              f"`{.wd <Grp> <Amt>}` **Withdraw:** Group -> Wallet")
@@ -1541,5 +1541,6 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+
 
 
