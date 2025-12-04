@@ -1455,7 +1455,7 @@ class HelpView(discord.ui.View):
     async def football_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         fields = [
             (f"{E_CROWN} **Club Stats**", f"`.ci <Club>` Info, `.cl <Club>` Level, `.lc` List, `.lb` Leaderboard."),
-            (f"{E_ITEMBOX} **Duelists**", f"`.rd` Register, `.ld` List, `.ret` Retire.",
+            (f"{E_ITEMBOX} **Duelists**", f"`.rd` Register, `.ld` List, `.ret` Retire."),
             (f"{E_ADMIN} **Owner Tools**", f"`.as <ID> <Amt>` Salary, `.ds <ID> yes` Deduct.")
         ]
         await self.send_category_embed(interaction, f"{E_STAR} Football Features", "Manage clubs.", fields, 0x3498db)
