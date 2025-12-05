@@ -1691,25 +1691,51 @@ async def transferclub(ctx, old: str, new: str):
     if c: clubs_col.update_one({"id": c['id']}, {"$set": {"owner_id": f"group:{new}"}})
     await ctx.send(embed=create_embed(f"{E_ADMIN} Transferred", f"Club moved to {new}.", 0xe67e22))
 
+# ==============================================================================
+#  --- DELETE THE OLD ON_MESSAGE AND PASTE THIS NEW ONE HERE ---
+# ==============================================================================
+
 # --- EVENTS ---
 @bot.event
 async def on_message(message):
-    if message.author.bot:
-        # PC Deposit (Poketwo Sync)
-        if message.author.id == 716390085896962058 and message.embeds:
+    # 1. Poketwo Balance Sync Listener (Improved)
+    if message.author.bot and message.author.id == 716390085896962058:
+        if message.embeds:
             emb = message.embeds[0]
-            if "Balance" in emb.title:
-                match = re.search(r"([\d,]+)\s*pc", emb.description, re.IGNORECASE)
+            # Check if it is a Balance Embed
+            if emb.title and "Balance" in emb.title:
+                # Combine description and fields to search for "PC" amount
+                search_text = (emb.description or "")
+                for f in emb.fields: search_text += f" {f.value}"
+                
+                # Regex to find "150,000 pc"
+                match = re.search(r"([\d,]+)\s*pc", search_text, re.IGNORECASE)
                 if match:
                     amount = int(match.group(1).replace(",", ""))
-                    user_id_match = re.search(r"<@(\d+)>", emb.description)
-                    if user_id_match:
-                        uid = user_id_match.group(1)
-                        wallets_col.update_one({"user_id": uid}, {"$set": {"pc": amount}}, upsert=True)
+                    target_id = None
+                    
+                    # STRATEGY 1: Check who Poketwo is replying to (Most Reliable)
+                    if message.reference:
+                        try:
+                            original_msg = await message.channel.fetch_message(message.reference.message_id)
+                            target_id = str(original_msg.author.id)
+                        except: pass
+                    
+                    # STRATEGY 2: Check for User Mention in text (Fallback)
+                    if not target_id:
+                        user_match = re.search(r"<@(\d+)>", search_text)
+                        if user_match: target_id = user_match.group(1)
+                    
+                    # Update Wallet if User Found
+                    if target_id:
+                        wallets_col.update_one({"user_id": target_id}, {"$set": {"pc": amount}}, upsert=True)
+                        # Add a reaction so the user knows it worked
+                        try: await message.add_reaction("✅") 
+                        except: pass
         return
 
-    # Daily Message Tracking
-    if message.channel.id == CHAT_CHANNEL_ID:
+    # 2. Daily Message Tracking (For Human Users)
+    if not message.author.bot and message.channel.id == CHAT_CHANNEL_ID:
         today = datetime.now().strftime("%Y-%m-%d")
         daily_stats_col.update_one(
             {"user_id": str(message.author.id), "date": today},
@@ -1718,6 +1744,10 @@ async def on_message(message):
         )
     
     await bot.process_commands(message)
+
+# ==============================================================================
+#  --- PASTE ENDS HERE. The on_ready event should be below this ---
+# ==============================================================================
 
 @bot.event
 async def on_ready():
