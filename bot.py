@@ -1540,6 +1540,35 @@ async def deduct_user(ctx, member: discord.Member, amount: HumanAmount):
     log_user_activity(member.id, "Deduct", f"${amount:,}")
     await ctx.send(embed=create_embed(f"{E_ADMIN} Deducted", f"Removed ${amount:,}", 0xe74c3c))
 
+#  PASTE THE CODE BELOW THIS LINE  -------------------------------------------
+
+@bot.hybrid_command(name="playerhistory", aliases=["ph"], description="Admin: View full user history.")
+@commands.has_permissions(administrator=True)
+async def playerhistory(ctx, user: discord.Member):
+    uid = str(user.id)
+    w = get_wallet(uid)
+    bal = w.get("balance", 0) if w else 0
+    
+    past_clubs = list(past_entities_col.find({"user_id": uid, "type": "ex_owner"}))
+    past_groups = list(past_entities_col.find({"user_id": uid, "type": "ex_member"}))
+    acts = list(activities_col.find({"user_id": uid}).sort("timestamp", -1).limit(50))
+    
+    data = []
+    summary = f"**Wallet:** ${bal:,}\n**Ex-Clubs:** {', '.join([p['name'] for p in past_clubs]) or 'None'}\n**Ex-Groups:** {', '.join([p['name'].title() for p in past_groups]) or 'None'}"
+    data.append((f"{E_CROWN} User Summary", summary))
+    
+    for act in acts:
+        ts = act['timestamp'].strftime("%Y-%m-%d %H:%M")
+        icon = E_CHAT if act['type'] == "Command" else E_MONEY
+        data.append((f"{icon} {act['type']} - {ts}", f"{act['description']}"))
+        
+    if not data: data.append(("No History", "This user has no recorded history."))
+    
+    view = Paginator(ctx, data, f"{E_BOOK} History: {user.display_name}", 0x3498db, 10)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+#  PASTE THE CODE ABOVE THIS
+
 @bot.hybrid_command(name="registerclub", description="Register club.")
 @commands.has_permissions(administrator=True)
 async def registerclub(ctx, name: str, base_price: int):
@@ -1701,4 +1730,5 @@ async def on_ready():
     except Exception as e: print(e)
 
 if __name__ == "__main__":
+
     bot.run(DISCORD_TOKEN)
