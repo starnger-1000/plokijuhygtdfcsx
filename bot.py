@@ -1542,6 +1542,79 @@ async def use(ctx, item_name: str):
     
     await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Box Opened!", f"You opened **{inv_item['item_name']}** and found:\n# **{prize_amt:,} {prize_curr}**", 0x2ecc71))
 
+# --- START OF HELP MENU & BOTINFO ---
+
+class HelpSelect(Select):
+    def __init__(self):
+        # This defines the dropdown options using your CUSTOM EMOJIS
+        options = [
+            discord.SelectOption(label="Economy & Groups", emoji=discord.PartialEmoji.from_str(E_MONEY), description="Wallet, Groups, Banking", value="economy"),
+            discord.SelectOption(label="Football & Roles", emoji=discord.PartialEmoji.from_str(E_FIRE), description="Clubs, Duelists, Salaries", value="football"),
+            discord.SelectOption(label="Club Market", emoji=discord.PartialEmoji.from_str(E_AUCTION), description="Auctions, Buying, Selling", value="market"),
+            discord.SelectOption(label="Pokémon Shop", emoji=discord.PartialEmoji.from_str(E_PC), description="Shop, Inventory, Rewards", value="shop"),
+            discord.SelectOption(label="Admin Tools", emoji=discord.PartialEmoji.from_str(E_ADMIN), description="Staff Commands Only", value="admin"),
+            discord.SelectOption(label="Updates (v5.8)", emoji=discord.PartialEmoji.from_str(E_BOOST), description="Patch Notes", value="updates")
+        ]
+        super().__init__(placeholder="Select a Help Category...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        val = self.values[0]
+        embed = discord.Embed(color=0x3498db)
+        
+        # This defines the CONTENT inside the categories
+        if val == "economy":
+            embed.title = f"{E_MONEY} Economy Guide"
+            embed.description = "Manage finances."
+            embed.color = 0x2ecc71
+            embed.add_field(name=f"{E_MONEY} **Personal Finance**", value=f"`.wl` **Wallet:** Check balance.\n`.ww <Amt>` **Withdraw Wallet:** Burn/delete money.", inline=False)
+            embed.add_field(name=f"{E_PREMIUM} **Groups**", value=f"`.cg <Name> <%>` **Create Group:** Start new group.\n`.jg <Name> <%>` **Join Group:** Join group.\n`.gi <Name>` **Info:** Funds & members.\n`.gl` **List:** All groups.\n`.lg <Name>` **Leave:** Exit group (10% penalty).", inline=False)
+            embed.add_field(name=f"{E_BOOST} **Banking**", value=f"`.dep <Grp> <Amt>` **Deposit:** Wallet → Group.\n`.wd <Grp> <Amt>` **Withdraw:** Group → Wallet.", inline=False)
+
+        elif val == "football":
+            embed.title = f"{E_FIRE} Football Features"
+            embed.description = "Manage clubs & players."
+            embed.color = 0x3498db
+            embed.add_field(name=f"{E_CROWN} **Clubs**", value=f"`.ci <Club>` **Info:** Owner, Value, Wins.\n`.cl <Club>` **Level:** Division progress.\n`.lc` **List:** All clubs.\n`.lb` **Leaderboard:** Global ranks.", inline=False)
+            embed.add_field(name=f"{E_ITEMBOX} **Duelists**", value=f"`.rd <Name> <Price> <Sal>` **Register:** Join as player.\n`.ld` **List:** Available players.\n`.ret` **Retire:** Delete profile.", inline=False)
+            embed.add_field(name=f"{E_ADMIN} **Owner Tools**", value=f"`.as <ID> <Amt>` **Salary:** Pay bonus/fine.\n`.ds <ID> yes` **Deduct:** Fine 15% for miss.", inline=False)
+
+        elif val == "market":
+            embed.title = f"{E_AUCTION} Club Market"
+            embed.description = "Buy, Sell & Trade."
+            embed.color = 0xe67e22
+            embed.add_field(name=f"{E_AUCTION} **Trading**", value=f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>}` **Shares:** Sell Group %.", inline=False)
+            embed.add_field(name=f"{E_TIMER} **Auctions**", value=f"`.pb <Amt> <Type> <ID>` **Bid:** Place bid.\n`.gb <Grp> <Amt> <Type> <ID>` **Group Bid:** Bid with group funds.", inline=False)
+            embed.add_field(name=f"{E_STARS} **Analysis**", value=f"`.mp <Club>` **Panel:** Financial stats.", inline=False)
+
+        elif val == "shop":
+            embed.title = f"{E_PC} Pokémon Market"
+            embed.description = "Buy & Sell Items."
+            embed.color = 0x9b59b6
+            embed.add_field(name=f"{E_SHINY} **Admin Shop**", value=f"`.shop` **Menu:** Open Shop UI.\n`.buy <ID>` **Buy:** Purchase item (Req Approval).", inline=False)
+            embed.add_field(name=f"{E_PC} **User Shop**", value=f"`.sellpokemon <Price>` **List:** Sell Pokétwo Pokémon.\n`.marketsearch <Query>` **Search:** Find user items.", inline=False)
+            embed.add_field(name=f"{E_ITEMBOX} **Inventory**", value=f"`.inv` **Inventory:** View items & coins.\n`.use <Item>` **Use:** Open Mystery Boxes.\n`.buycoins <Amt>` **Exchange:** Cash → Shiny Coins.", inline=False)
+
+        elif val == "admin":
+            if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
+            embed.title = f"{E_ADMIN} Staff Commands"
+            embed.description = "Admin Control Panel."
+            embed.color = 0xff0000
+            embed.add_field(name=f"{E_ADMIN} **Management**", value=f"`.checkdeals` **Club Deals**\n`.rc` **Register Club** | `.dc` **Delete Club**\n`.addshopitem` / `.addpokemon` / `.addmysterybox`\n`.addshinycoins` / `.addpc`", inline=False)
+            embed.add_field(name=f"{E_AUCTION} **Auctions**", value=f"`.sca` **Club Auction** | `.sda` **Duelist Auction**\n`.fa` **Freeze** | `.ufa` **Unfreeze**", inline=False)
+            embed.add_field(name=f"{E_MONEY} **Economy**", value=f"`.tp` **Tip** | `.du` **Deduct** | `.agf` **Group Fund** | `.po` **Payout**", inline=False)
+
+        elif val == "updates":
+            embed.title = f"{E_ALERT} Patch Notes v5.8"
+            embed.description = f"{E_STARS} **Latest Updates**\n{E_GOLD_TICK} **Interactive Shop:** New .shop menu.\n{E_GOLD_TICK} **User Listings:** Sell Pokémon securely.\n{E_GOLD_TICK} **Tax System:** 5% Tax on User Deals.\n{E_GOLD_TICK} **Approval:** Admin approval for all buys."
+            embed.color = 0x9b59b6
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class HelpView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(HelpSelect())
+
 @bot.hybrid_command(name="botinfo", aliases=["info", "guide"], description="Open help panel.")
 async def botinfo(ctx):
     desc = (
@@ -1563,8 +1636,9 @@ async def botinfo(ctx):
     )
     embed = discord.Embed(title=f"{E_CROWN} **Ze Bot System**", description=desc, color=0xf1c40f)
     if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
-    embed.add_field(name="Commands", value=f"Click the buttons below for the full guide.", inline=False)
-    view = HelpView() # Uses the HelpView from Part 1 (Economy/Football buttons remain valid)
+    # UPDATED LINE BELOW:
+    embed.add_field(name="Commands", value=f"Use the menu below to browse commands.", inline=False)
+    view = HelpView() 
     await ctx.send(embed=embed, view=view)
 
 # ---------- RUN ----------
@@ -1588,3 +1662,4 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
