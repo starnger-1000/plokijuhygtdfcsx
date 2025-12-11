@@ -1541,6 +1541,56 @@ async def inventory(ctx):
     first_embed.description = desc
     await ctx.send(embed=first_embed, view=view)
 
+# ===========================
+#   REWARDS & CODES SYSTEM
+# ===========================
+
+@bot.hybrid_command(name="create_coupon", aliases=["cc"], description="Admin: Create Discount Code.")
+@commands.has_permissions(administrator=True)
+async def create_coupon(ctx, code: str, discount_percent: int, uses: int):
+    coupons_col.insert_one({"code": code, "discount": discount_percent, "uses": uses})
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Coupon Created", f"Code: **{code}**\nDiscount: **{discount_percent}%**\nUses: **{uses}**", 0xe67e22))
+
+@bot.hybrid_command(name="coupon", description="Check/Use a Coupon.")
+async def coupon(ctx, code: str):
+    # Validates and burns a use. Useful for manual deals or giveaways.
+    c = coupons_col.find_one({"code": code})
+    if not c or c['uses'] <= 0:
+        return await ctx.send(embed=create_embed("Invalid", "Coupon invalid or expired.", 0xff0000))
+
+    coupons_col.update_one({"_id": c['_id']}, {"$inc": {"uses": -1}})
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Coupon Valid", f"Code **{code}** redeemed!\n**{c['discount']}% OFF** applied (Manual Deal).", 0x2ecc71))
+
+@bot.hybrid_command(name="create_redeem", aliases=["crc"], description="Admin: Create Currency Code.")
+@commands.has_permissions(administrator=True)
+async def create_redeem(ctx, type: str, amount: int):
+    if type.lower() not in ['pc', 'shiny']: return await ctx.send("Type must be 'pc' or 'shiny'.")
+    
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    redeem_codes_col.insert_one({"code": code, "type": type.lower(), "amount": amount, "claimed": False})
+    
+    emoji = E_SHINY if type.lower() == 'shiny' else E_PC
+    # Send code to Admin DM so it isn't sniped immediately
+    try:
+        await ctx.author.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}", 0xe67e22))
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Created", "Code sent to your DMs.", 0x2ecc71))
+    except:
+        await ctx.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}", 0xe67e22))
+
+@bot.hybrid_command(name="redeem", aliases=["rcode"], description="Claim a Currency Code.")
+async def redeem(ctx, code: str):
+    r = redeem_codes_col.find_one({"code": code, "claimed": False})
+    if not r: return await ctx.send(embed=create_embed("Error", "Invalid or claimed code.", 0xff0000))
+    
+    redeem_codes_col.update_one({"_id": r['_id']}, {"$set": {"claimed": True, "claimed_by": str(ctx.author.id)}})
+    
+    curr_key = "shiny_coins" if r['type'] == 'shiny' else "pc"
+    emoji = E_SHINY if r['type'] == 'shiny' else E_PC
+    
+    wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {curr_key: r['amount']}}, upsert=True)
+    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Redeemed!", f"You claimed **{r['amount']:,}** {emoji}!", 0x2ecc71))
+
+
 @bot.hybrid_command(name="use", description="Use an Item/Box.")
 async def use(ctx, item_name: str):
     # Logic for Mystery Boxes
@@ -1685,6 +1735,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
