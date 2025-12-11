@@ -408,6 +408,29 @@ async def withdrawwallet(ctx, amount: HumanInt):
     log_user_activity(ctx.author.id, "Transaction", f"Burned ${amount:,} from wallet.")
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Withdrawn", f"Removed **${amount:,}** from wallet.", 0x2ecc71))
 
+@bot.hybrid_command(name="daily", aliases=["claim"], description="Claim Daily Reward (100 msgs req).")
+async def daily(ctx):
+    today = datetime.now().strftime("%Y-%m-%d")
+    data = message_counts_col.find_one({"user_id": str(ctx.author.id), "date": today})
+    count = data.get("count", 0) if data else 0
+    
+    if count < DAILY_MSG_REQ: 
+        return await ctx.send(embed=create_embed("Daily Locked", f"{E_DANGER} You need **{DAILY_MSG_REQ}** messages today.\nCurrent: **{count}**", 0xff0000))
+    
+    user = wallets_col.find_one({"user_id": str(ctx.author.id)})
+    last = user.get("last_daily") if user else None
+    
+    if last and (datetime.now() - last) < timedelta(hours=24): 
+        next_claim = int((last + timedelta(hours=24)).timestamp())
+        return await ctx.send(embed=create_embed("Cooldown", f"Next claim: <t:{next_claim}:R>", 0x95a5a6))
+    
+    wallets_col.update_one(
+        {"user_id": str(ctx.author.id)}, 
+        {"$inc": {"balance": 10000, "shiny_coins": 5}, "$set": {"last_daily": datetime.now()}}, 
+        upsert=True
+    )
+    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Daily Claimed", f"You received:\n+$10,000 {E_MONEY}\n+5 {E_SHINY}", 0x2ecc71))
+
 @bot.hybrid_command(name="grouplist", aliases=["gl"], description="List all investor groups.")
 async def grouplist(ctx):
     groups = list(groups_col.find())
@@ -1662,6 +1685,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
