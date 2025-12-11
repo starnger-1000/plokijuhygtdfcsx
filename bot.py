@@ -1401,42 +1401,61 @@ class ShopApprovalView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(embed=create_embed(f"{E_DANGER} Deal Denied", f"Denied by {interaction.user.mention}.", 0xff0000), view=None)
 
-@bot.hybrid_command(name="buy", description="Buy Item (Requires Approval).")
-async def buy(ctx, item_id: int):
+@bot.hybrid_command(name="buy", description="Buy Item (Opt: Use Coupon).")
+async def buy(ctx, item_id: int, coupon_code: str = None):
     item = shop_items_col.find_one({"id": item_id, "sold": False})
     if not item: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item not found or already sold.", 0xff0000))
     
-    # Calc Costs
+    # Base Costs
     price = item['price']
     currency = item['currency'] # 'pc' or 'shiny'
     is_admin_shop = item['seller_id'] == "ADMIN"
     
+    # 1. Calculate Base Tax/Payout
     buyer_pays = price
     seller_gets = price
     tax_info = "None"
     
-    # Tax Logic (Only for User Market PC deals unless exempt)
     if not is_admin_shop and currency == "pc" and not item.get("tax_exempt", False):
         buyer_pays = int(price * (1 + TAX_BUYER_ADD))
         seller_gets = int(price * (1 - TAX_SELLER_SUB))
         tax_info = f"Buyer +2.5% | Seller -2.5%"
+
+    # 2. Apply Coupon Logic (If provided)
+    discount_applied = 0
+    coupon_msg = ""
     
-    # Check Wallet
+    if coupon_code:
+        cpn = coupons_col.find_one({"code": coupon_code})
+        if cpn and cpn['uses'] > 0:
+            discount_percent = cpn['discount']
+            # Calculate discount on the BUYER's final price
+            discount_amount = int(buyer_pays * (discount_percent / 100))
+            buyer_pays -= discount_amount
+            
+            # Decrement Coupon Use
+            coupons_col.update_one({"_id": cpn['_id']}, {"$inc": {"uses": -1}})
+            
+            coupon_msg = f"\n{E_GIVEAWAY} **Coupon:** {coupon_code} (-{discount_percent}%) applied! Saved {discount_amount:,}"
+        else:
+            return await ctx.send(embed=create_embed("Invalid Coupon", "Code invalid or expired.", 0xff0000))
+
+    # 3. Check Wallet
     w = wallets_col.find_one({"user_id": str(ctx.author.id)})
     bal = w.get("shiny_coins" if currency == "shiny" else "pc", 0) if w else 0
     
     emoji_curr = E_SHINY if currency == "shiny" else E_PC
     
     if bal < buyer_pays:
-        return await ctx.send(embed=create_embed("Insufficient Funds", f"Cost: **{buyer_pays:,}** {emoji_curr}\nYou have: **{bal:,}** {emoji_curr}", 0xff0000))
+        return await ctx.send(embed=create_embed("Insufficient Funds", f"Final Cost: **{buyer_pays:,}** {emoji_curr}\nYou have: **{bal:,}** {emoji_curr}", 0xff0000))
     
-    # Create Approval Request
+    # 4. Create Approval Request
     deal_id = get_next_id("shop_deal_id")
     approval_data = {
         "id": deal_id, "item_id": item['id'], "item_name": item['name'],
         "buyer_id": str(ctx.author.id), "seller_id": item['seller_id'],
         "base_price": price, "buyer_pays": buyer_pays, "seller_gets": seller_gets,
-        "currency": currency, "timestamp": datetime.now()
+        "currency": currency, "timestamp": datetime.now(), "coupon_used": coupon_code
     }
     pending_shop_approvals.insert_one(approval_data)
     
@@ -1447,19 +1466,19 @@ async def buy(ctx, item_id: int):
                                  f"**Item:** {item['name']} (ID: {item['id']})\n"
                                  f"**Buyer:** {ctx.author.mention}\n"
                                  f"**Seller:** {'ADMIN' if is_admin_shop else f'<@{item['seller_id']}>'}\n"
-                                 f"**Price:** {price:,} {emoji_curr}\n"
-                                 f"**Final Cost:** {buyer_pays:,} {emoji_curr} (Tax: {tax_info})", 0xe67e22, thumbnail=item.get("image_url"))
+                                 f"**Base Price:** {price:,} {emoji_curr}\n"
+                                 f"**Final Cost:** {buyer_pays:,} {emoji_curr} (Tax: {tax_info}){coupon_msg}", 
+                                 0xe67e22, thumbnail=item.get("image_url"))
         await log_ch.send(embed=embed_log, view=ShopApprovalView(deal_id))
     
     # DM Seller
     if not is_admin_shop:
         try:
             seller_user = await bot.fetch_user(int(item['seller_id']))
-            await seller_user.send(embed=create_embed(f"{E_PC} Purchase Request", f"User {ctx.author.name} wants to buy **{item['name']}** for **{price:,}** {E_PC}.\nWaiting for Admin Approval.", 0x3498db))
+            await seller_user.send(embed=create_embed(f"{E_PC} Purchase Request", f"User {ctx.author.name} wants to buy **{item['name']}**.\nWaiting for Admin Approval.", 0x3498db))
         except: pass
     
-    await ctx.send(embed=create_embed(f"{E_TIMER} Request Sent", f"Purchase request submitted for **{item['name']}**.\nCost: **{buyer_pays:,}** {emoji_curr}\n{E_ADMIN} Waiting for Admin Approval.", 0xf1c40f))
-
+    await ctx.send(embed=create_embed(f"{E_TIMER} Request Sent", f"Purchase request submitted for **{item['name']}**.\n**Cost:** {buyer_pays:,} {emoji_curr}\n{coupon_msg}\n{E_ADMIN} Waiting for Admin Approval.", 0xf1c40f))
 class ShopSelect(Select):
     def __init__(self, ctx):
         options = [
@@ -1735,6 +1754,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
