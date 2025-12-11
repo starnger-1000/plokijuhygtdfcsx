@@ -1250,28 +1250,47 @@ async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = No
     })
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** added to Admin Shop.\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
 
-@bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon to Shop.")
+@bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon (Select Category).")
+@discord.app_commands.choices(category=[
+    discord.app_commands.Choice(name="Common 🍀", value="common"),
+    discord.app_commands.Choice(name="Rare 🌌", value="rare"),
+    discord.app_commands.Choice(name="Shiny ✨", value="shiny"),
+    discord.app_commands.Choice(name="Regional ⛩️", value="regional")
+])
 @commands.has_permissions(administrator=True)
-async def addpokemon(ctx, name: str, level: int, iv: float, price: int, image: discord.Attachment = None):
+async def addpokemon(ctx, name: str, level: int, iv: float, price: int, category: discord.app_commands.Choice[str], image: discord.Attachment = None):
     item_id = f"A{get_next_id('shop_item_id')}"
     img_url = image.url if image else None
+    
+    # Map values to Emojis
+    emoji_map = {"common": "🍀", "rare": "🌌", "shiny": "✨", "regional": "⛩️"}
+    cat_emoji = emoji_map[category.value]
+    
     shop_items_col.insert_one({
-        "id": item_id, "type": "pokemon", "name": name, "price": price, 
+        "id": item_id, "type": "pokemon", "name": f"{name} {cat_emoji}", "price": price, 
         "currency": "shiny", "seller_id": "ADMIN", "image_url": img_url, 
-        "stats": {"level": level, "iv": iv}, "sold": False, "tax_exempt": True, "category": "pokemon"
+        "stats": {"level": level, "iv": iv}, "sold": False, "tax_exempt": True, 
+        "category": "pokemon", "sub_category": category.value  # Vital for Mystery Box logic
     })
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** (Lvl {level}, {iv}%) added.\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** {cat_emoji} (Lvl {level}, {iv}%) added.\nCategory: {category.name}\nID: {item_id}", 0x2ecc71))
 
-@bot.hybrid_command(name="addmysterybox", description="Admin: Add Box to Shop.")
+@bot.hybrid_command(name="addmysterybox", description="Admin: Add Box (Select Pool).")
+@discord.app_commands.choices(pool=[
+    discord.app_commands.Choice(name="Common Pool 🍀", value="common"),
+    discord.app_commands.Choice(name="Rare Pool 🌌", value="rare"),
+    discord.app_commands.Choice(name="Shiny Pool ✨", value="shiny"),
+    discord.app_commands.Choice(name="Regional Pool ⛩️", value="regional")
+])
 @commands.has_permissions(administrator=True)
-async def addmysterybox(ctx, name: str, price: int, reward_type: str):
+async def addmysterybox(ctx, name: str, price: int, pool: discord.app_commands.Choice[str]):
     item_id = f"A{get_next_id('shop_item_id')}"
+    
     shop_items_col.insert_one({
         "id": item_id, "type": "box", "name": name, "price": price, 
-        "currency": "shiny", "seller_id": "ADMIN", "reward_type": reward_type, 
+        "currency": "shiny", "seller_id": "ADMIN", "reward_type": pool.value, 
         "sold": False, "tax_exempt": True, "category": "mystery"
     })
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** added.\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Box Added", f"**{name}** added.\nPool: **{pool.name}**\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
 
 @bot.hybrid_command(name="addshinycoins", description="Admin: Grant Shiny Coins.")
 @commands.has_permissions(administrator=True)
@@ -1541,6 +1560,26 @@ async def marketsearch(ctx, search: str):
     view = Paginator(ctx, data, f"Search: {search}", 0x3498db)
     await ctx.send(embed=view.get_embed(), view=view)
 
+@bot.hybrid_command(name="pinfo", description="Inspect Admin Pokemon.")
+async def pinfo(ctx, item_id: str):
+    item = shop_items_col.find_one({"id": item_id, "type": "pokemon", "seller_id": "ADMIN"})
+    if not item: return await ctx.send(embed=create_embed("Not Found", "Invalid ID or not an Admin Pokemon.", 0xff0000))
+        
+    stats = item.get("stats", {"level": 0, "iv": 0})
+    cat_raw = item.get("sub_category", "Unknown")
+    emoji_map = {"common": "🍀", "rare": "🌌", "shiny": "✨", "regional": "⛩️"}
+    
+    desc = (
+        f"**Name:** {item['name']}\n"
+        f"**Category:** {cat_raw.title()} {emoji_map.get(cat_raw, '')}\n"
+        f"**Level:** {stats['level']}\n"
+        f"**IV:** {stats['iv']}%\n"
+        f"**Price:** {item['price']:,} {E_SHINY}\n"
+        f"**Status:** {'Sold 🔴' if item['sold'] else 'Available 🟢'}"
+    )
+    await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
+
+
 @bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
 async def inventory(ctx):
     w = wallets_col.find_one({"user_id": str(ctx.author.id)})
@@ -1633,27 +1672,40 @@ async def redeem(ctx, code: str):
 
 @bot.hybrid_command(name="use", description="Use an Item/Box.")
 async def use(ctx, item_name: str):
-    # Logic for Mystery Boxes
+    # 1. Find box in inventory
     inv_item = inventory_col.find_one({"user_id": str(ctx.author.id), "item_name": {"$regex": f"^{item_name}$", "$options": "i"}})
     if not inv_item: return await ctx.send(embed=create_embed("Error", "Item not in inventory.", 0xff0000))
     
     shop_ref = shop_items_col.find_one({"id": inv_item.get("item_id")})
     if not shop_ref or shop_ref.get("category") != "mystery":
-        return await ctx.send(embed=create_embed("Info", "This item cannot be 'used' yet.", 0x95a5a6))
+        return await ctx.send(embed=create_embed("Info", "This item cannot be 'used'.", 0x95a5a6))
     
-    # Reward Logic
-    reward_type = shop_ref.get("reward_type", "common")
-    prize_amt = 0
-    prize_curr = E_PC
+    pool_type = shop_ref.get("reward_type", "common")
     
-    if reward_type == "common": prize_amt = random.randint(1000, 5000); curr_key="pc"
-    elif reward_type == "rare": prize_amt = random.randint(10000, 50000); curr_key="pc"
-    elif reward_type == "shiny": prize_amt = random.randint(1, 5); curr_key="shiny_coins"; prize_curr=E_SHINY
+    # 2. Find Random Prize
+    candidates = list(shop_items_col.find({
+        "type": "pokemon", "seller_id": "ADMIN", "sold": False, "sub_category": pool_type
+    }))
     
-    wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {curr_key: prize_amt}})
+    if not candidates:
+        return await ctx.send(embed=create_embed("Stock Empty", f"No {pool_type.title()} Pokemon available in Admin Shop! Ask an Admin to restock.", 0xff0000))
+    
+    prize = random.choice(candidates)
+    
+    # 3. Transfer Prize
+    shop_items_col.update_one({"_id": prize["_id"]}, {"$set": {"sold": True, "buyer_id": str(ctx.author.id)}})
+    
+    inventory_col.insert_one({
+        "user_id": str(ctx.author.id), "item_id": prize["id"], "item_name": prize["name"], 
+        "price": 0, "currency": "reward", "timestamp": datetime.now(), "stats": prize.get("stats")
+    })
+    
+    # 4. Burn Box
     inventory_col.delete_one({"_id": inv_item["_id"]})
     
-    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Box Opened!", f"You opened **{inv_item['item_name']}** and found:\n# **{prize_amt:,} {prize_curr}**", 0x2ecc71))
+    embed = create_embed(f"{E_GIVEAWAY} Box Opened!", f"You opened **{inv_item['item_name']}** and found:\n# {prize['name']}", 0x2ecc71)
+    if prize.get("image_url"): embed.set_thumbnail(url=prize["image_url"])
+    await ctx.send(embed=embed)
 
 # --- START OF HELP MENU & BOTINFO ---
 
@@ -1775,6 +1827,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
