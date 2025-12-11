@@ -1582,33 +1582,54 @@ async def coupon(ctx, code: str):
 
 @bot.hybrid_command(name="create_redeem", aliases=["crc"], description="Admin: Create Currency Code.")
 @commands.has_permissions(administrator=True)
-async def create_redeem(ctx, type: str, amount: int):
+async def create_redeem(ctx, type: str, amount: int, uses: int = 1):
     if type.lower() not in ['pc', 'shiny']: return await ctx.send("Type must be 'pc' or 'shiny'.")
     
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    redeem_codes_col.insert_one({"code": code, "type": type.lower(), "amount": amount, "claimed": False})
+    
+    # NEW STRUCTURE: Stores max_uses and a list of users who claimed it
+    redeem_codes_col.insert_one({
+        "code": code, 
+        "type": type.lower(), 
+        "amount": amount, 
+        "max_uses": uses, 
+        "claimed_users": [] 
+    })
     
     emoji = E_SHINY if type.lower() == 'shiny' else E_PC
-    # Send code to Admin DM so it isn't sniped immediately
     try:
-        await ctx.author.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}", 0xe67e22))
+        await ctx.author.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}\nUses: **{uses}**", 0xe67e22))
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Created", "Code sent to your DMs.", 0x2ecc71))
     except:
-        await ctx.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}", 0xe67e22))
+        await ctx.send(embed=create_embed(f"{E_ADMIN} Code Created", f"Code: `{code}`\nValue: **{amount:,}** {emoji}\nUses: **{uses}**", 0xe67e22))
 
 @bot.hybrid_command(name="redeem", aliases=["rcode"], description="Claim a Currency Code.")
 async def redeem(ctx, code: str):
-    r = redeem_codes_col.find_one({"code": code, "claimed": False})
-    if not r: return await ctx.send(embed=create_embed("Error", "Invalid or claimed code.", 0xff0000))
+    r = redeem_codes_col.find_one({"code": code})
     
-    redeem_codes_col.update_one({"_id": r['_id']}, {"$set": {"claimed": True, "claimed_by": str(ctx.author.id)}})
+    # 1. Validation Checks
+    if not r: 
+        return await ctx.send(embed=create_embed("Error", "Invalid code.", 0xff0000))
     
+    if len(r.get("claimed_users", [])) >= r.get("max_uses", 1):
+        return await ctx.send(embed=create_embed("Error", "Code fully claimed.", 0xff0000))
+        
+    if str(ctx.author.id) in r.get("claimed_users", []):
+        return await ctx.send(embed=create_embed("Error", "You already claimed this.", 0xff0000))
+    
+    # 2. Process Claim
     curr_key = "shiny_coins" if r['type'] == 'shiny' else "pc"
     emoji = E_SHINY if r['type'] == 'shiny' else E_PC
     
+    # Add user to claimed list
+    redeem_codes_col.update_one({"_id": r['_id']}, {"$push": {"claimed_users": str(ctx.author.id)}})
+    
+    # Give Money
     wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {curr_key: r['amount']}}, upsert=True)
-    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Redeemed!", f"You claimed **{r['amount']:,}** {emoji}!", 0x2ecc71))
-
+    
+    # 3. Success Message (Shows remaining uses)
+    uses_left = r['max_uses'] - (len(r.get("claimed_users", [])) + 1)
+    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Redeemed!", f"You claimed **{r['amount']:,}** {emoji}!\n({uses_left} claims remaining)", 0x2ecc71))
 
 @bot.hybrid_command(name="use", description="Use an Item/Box.")
 async def use(ctx, item_name: str):
@@ -1754,6 +1775,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
