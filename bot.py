@@ -1582,7 +1582,7 @@ class HelpSelect(Select):
             embed.title = f"{E_AUCTION} Club Market"
             embed.description = "Buy, Sell & Trade."
             embed.color = 0xe67e22
-            embed.add_field(name=f"{E_AUCTION} **Trading**", value=f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>}` **Shares:** Sell Group %.", inline=False)
+            embed.add_field(name=f"{E_AUCTION} **Trading**", value=f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>` **Shares:** Sell Group %.", inline=False)
             embed.add_field(name=f"{E_TIMER} **Auctions**", value=f"`.pb <Amt> <Type> <ID>` **Bid:** Place bid.\n`.gb <Grp> <Amt> <Type> <ID>` **Group Bid:** Bid with group funds.", inline=False)
             embed.add_field(name=f"{E_STARS} **Analysis**", value=f"`.mp <Club>` **Panel:** Financial stats.", inline=False)
 
@@ -1662,5 +1662,6 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
