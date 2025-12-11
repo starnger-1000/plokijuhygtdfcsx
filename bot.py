@@ -1439,11 +1439,11 @@ async def buy(ctx, item_id: int):
 
 class ShopSelect(Select):
     def __init__(self, ctx):
-        options = [
-            discord.SelectOption(label="User Market", description="Player listings (PC)", emoji="🏪", value="user_market"),
-            discord.SelectOption(label="Admin: Pokemon", description="Official Pokemon (Shiny Coins)", emoji="🐉", value="pokemon"),
-            discord.SelectOption(label="Admin: Items", description="Items & Tools (Shiny Coins)", emoji="🎒", value="item"),
-            discord.SelectOption(label="Admin: Mystery Boxes", description="Try your luck (Shiny Coins)", emoji="🎁", value="mystery"),
+       options = [
+            discord.SelectOption(label="User Market", description="Player listings (PC)", emoji=discord.PartialEmoji.from_str(E_PC), value="user_market"),
+            discord.SelectOption(label="Admin: Pokemon", description="Official Pokemon (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_PIKACHU), value="pokemon"),
+            discord.SelectOption(label="Admin: Items", description="Items & Tools (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_ITEMBOX), value="item"),
+            discord.SelectOption(label="Admin: Mystery Boxes", description="Try your luck (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_GIVEAWAY), value="mystery"),
         ]
         super().__init__(placeholder="Select Shop Category...", min_values=1, max_values=1, options=options)
         self.ctx = ctx
@@ -1586,4 +1586,5 @@ async def on_command_error(ctx, error):
     else: print(error)
 
 if __name__ == "__main__":
+
     bot.run(DISCORD_TOKEN)
