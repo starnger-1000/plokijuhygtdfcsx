@@ -1402,7 +1402,7 @@ class ShopApprovalView(discord.ui.View):
         await interaction.response.edit_message(embed=create_embed(f"{E_DANGER} Deal Denied", f"Denied by {interaction.user.mention}.", 0xff0000), view=None)
 
 @bot.hybrid_command(name="buy", description="Buy Item (Opt: Use Coupon).")
-async def buy(ctx, item_id: int, coupon_code: str = None):
+async def buy(ctx, item_id: str, coupon_code: str = None):
     item = shop_items_col.find_one({"id": item_id, "sold": False})
     if not item: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item not found or already sold.", 0xff0000))
     
