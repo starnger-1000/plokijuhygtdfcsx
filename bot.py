@@ -1241,7 +1241,7 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
 @bot.hybrid_command(name="addshopitem", description="Admin: Add Item to Shop.")
 @commands.has_permissions(administrator=True)
 async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = None):
-    item_id = get_next_id("shop_item_id")
+    item_id = f"A{get_next_id('shop_item_id')}" 
     img_url = image.url if image else None
     shop_items_col.insert_one({
         "id": item_id, "type": "item", "name": name, "price": price, 
@@ -1253,7 +1253,7 @@ async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = No
 @bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon to Shop.")
 @commands.has_permissions(administrator=True)
 async def addpokemon(ctx, name: str, level: int, iv: float, price: int, image: discord.Attachment = None):
-    item_id = get_next_id("shop_item_id")
+    item_id = f"A{get_next_id('shop_item_id')}"
     img_url = image.url if image else None
     shop_items_col.insert_one({
         "id": item_id, "type": "pokemon", "name": name, "price": price, 
@@ -1265,7 +1265,7 @@ async def addpokemon(ctx, name: str, level: int, iv: float, price: int, image: d
 @bot.hybrid_command(name="addmysterybox", description="Admin: Add Box to Shop.")
 @commands.has_permissions(administrator=True)
 async def addmysterybox(ctx, name: str, price: int, reward_type: str):
-    item_id = get_next_id("shop_item_id")
+    item_id = f"A{get_next_id('shop_item_id')}"
     shop_items_col.insert_one({
         "id": item_id, "type": "box", "name": name, "price": price, 
         "currency": "shiny", "seller_id": "ADMIN", "reward_type": reward_type, 
@@ -1309,7 +1309,7 @@ async def sellpokemon(ctx, price: int):
         
         image_url = embed.thumbnail.url if embed.thumbnail else (embed.image.url if embed.image else None)
         
-        item_id = get_next_id("shop_item_id")
+        item_id = f"U{get_next_id('shop_item_id')}"
         shop_items_col.insert_one({
             "id": item_id, "type": "pokemon", "name": title, "price": price, 
             "currency": "pc", "seller_id": str(ctx.author.id), "image_url": image_url,
@@ -1754,6 +1754,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
