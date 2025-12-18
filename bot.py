@@ -871,67 +871,6 @@ async def leaderboard(ctx):
     await ctx.send(embed=view.get_embed(), view=view)
 
 
-# ==============================================================================
-#  MISSING CLUB MARKET COMMANDS (Admin Approval System)
-# ==============================================================================
-
-@bot.hybrid_command(name="buyclub", aliases=["bc"], description="Request to buy an unowned club (Requires Admin Approval).")
-async def buyclub(ctx, club_name: str):
-    # 1. Find Club
-    c = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
-    if not c: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
-    if c.get("owner_id"): return await ctx.send(embed=create_embed("Error", f"{E_DANGER} This club is already owned.", 0xff0000))
-    
-    # 2. Check Ownership Limit
-    prof = profiles_col.find_one({"user_id": str(ctx.author.id)})
-    if prof and prof.get("owned_club_id"): return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You already own a club.", 0xff0000))
-    
-    # 3. Check Funds
-    price = c["value"]
-    w = get_wallet(ctx.author.id)
-    if not w or w.get("balance", 0) < price: return await ctx.send(embed=create_embed("Insufficient Funds", f"{E_ERROR} You need **${price:,}**.", 0xff0000))
-    
-    # 4. Deduct & Hold Funds
-    wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": -price}})
-    
-    # 5. Create Pending Deal
-    deal_id = get_next_id("deal_id")
-    db.pending_deals.insert_one({
-        "id": deal_id,
-        "type": "club_buy",
-        "buyer_id": str(ctx.author.id),
-        "club_id": c["id"],
-        "club_name": c["name"],
-        "price": price,
-        "timestamp": datetime.now()
-    })
-    
-    # 6. Notify
-    embed = discord.Embed(title=f"{E_TIMER} Deal Pending #{deal_id}", description=f"Request to buy **{c['name']}** submitted.\n\n{E_MONEY} **Funds Held:** ${price:,}\n{E_ADMIN} **Status:** Waiting for Admin Approval", color=0xf1c40f)
-    if c.get("logo"): embed.set_thumbnail(url=c["logo"])
-    
-    # Send Log to Pending Channel
-    log_ch = bot.get_channel(LOG_CHANNELS["pending"])
-    if log_ch: await log_ch.send(embed=embed)
-    
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="checkdeals", aliases=["cd"], description="Admin: View pending club deals.")
-@commands.has_permissions(administrator=True)
-async def checkdeals(ctx):
-    deals = list(db.pending_deals.find({"type": "club_buy"}).sort("timestamp", 1))
-    
-    if not deals: return await ctx.send(embed=create_embed(f"{E_SUCCESS} All Clear", "No pending club deals.", 0x2ecc71))
-    
-    data = []
-    for d in deals:
-        data.append((
-            f"Deal #{d['id']} | {d['club_name']}",
-            f"{E_MONEY} **Price:** ${d['price']:,}\n{E_CROWN} **Buyer:** <@{d['buyer_id']}>\n{E_TIMER} **Time:** {d['timestamp'].strftime('%Y-%m-%d %H:%M')}"
-        ))
-    
-    view = Paginator(ctx, data, f"{E_ADMIN} Pending Club Approvals", 0xe67e22, 5)
-    await ctx.send(embed=view.get_embed(), view=view)
 
 
 
@@ -1945,6 +1884,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
