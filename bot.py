@@ -1016,55 +1016,6 @@ async def checkdeals(ctx):
     view = Paginator(ctx, data, f"{E_ADMIN} Pending Club Approvals", 0xe67e22, 5)
     await ctx.send(embed=view.get_embed(), view=view)
 
-@bot.hybrid_command(name="managedeal", aliases=["md"], description="Admin: Approve or Reject a deal.")
-@commands.has_permissions(administrator=True)
-async def managedeal(ctx, deal_id: int, action: str):
-    action = action.lower()
-    if action not in ["approve", "reject"]: return await ctx.send(embed=create_embed("Error", "Action must be `approve` or `reject`.", 0xff0000))
-    
-    deal = db.pending_deals.find_one({"id": deal_id, "type": "club_buy"})
-    if not deal: return await ctx.send(embed=create_embed("Error", "Deal ID not found.", 0xff0000))
-    
-    c = clubs_col.find_one({"id": deal['club_id']})
-    buyer_id = deal['buyer_id']
-    price = deal['price']
-    
-    if action == "reject":
-        # Refund
-        wallets_col.update_one({"user_id": buyer_id}, {"$inc": {"balance": price}})
-        db.pending_deals.delete_one({"id": deal_id})
-        
-        try: 
-            user = await bot.fetch_user(int(buyer_id))
-            await user.send(embed=create_embed(f"{E_DANGER} Deal Rejected", f"Your request to buy **{deal['club_name']}** was rejected.\n{E_MONEY} **${price:,}** has been refunded.", 0xff0000))
-        except: pass
-        
-        await ctx.send(embed=create_embed(f"{E_SUCCESS} Rejected", f"Deal #{deal_id} rejected. Funds refunded.", 0x2ecc71))
-        return
-
-    if action == "approve":
-        # Check if club was bought by someone else in the meantime
-        if c.get("owner_id"):
-            wallets_col.update_one({"user_id": buyer_id}, {"$inc": {"balance": price}}) # Refund
-            db.pending_deals.delete_one({"id": deal_id})
-            return await ctx.send(embed=create_embed("Error", "Club is already owned! Deal cancelled and refunded.", 0xff0000))
-            
-        # Transfer Ownership
-        clubs_col.update_one({"id": c["id"]}, {"$set": {"owner_id": buyer_id}})
-        profiles_col.update_one({"user_id": buyer_id}, {"$set": {"owned_club_id": c["id"], "owned_club_share": 100}}, upsert=True)
-        
-        # Log
-        log_user_activity(buyer_id, "Purchase", f"Bought {c['name']} (Approved)")
-        history_col.insert_one({"club_id": c["id"], "winner": buyer_id, "amount": price, "timestamp": datetime.now(), "type": "market_buy"})
-        
-        log_embed = create_embed(f"{E_GIVEAWAY} CLUB SOLD (Market)", f"Transfer Approved by {ctx.author.mention}\n\n{E_STAR} **Club:** {c['name']}\n{E_CROWN} **New Owner:** <@{buyer_id}>\n{E_MONEY} **Price:** ${price:,}", 0xf1c40f)
-        if c.get("logo"): log_embed.set_thumbnail(url=c['logo'])
-        await send_log("club", log_embed)
-        
-        db.pending_deals.delete_one({"id": deal_id})
-        await ctx.send(embed=create_embed(f"{E_SUCCESS} Approved", f"Deal #{deal_id} approved. Ownership transferred.", 0x2ecc71))
-
-
 
 
 # ===========================
@@ -1942,6 +1893,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
