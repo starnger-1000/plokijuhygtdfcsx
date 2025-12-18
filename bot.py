@@ -1195,6 +1195,21 @@ async def unfreezeauction(ctx):
     bidding_frozen = False
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Unfrozen", "Auctions resumed.", 0x2ecc71))
 
+
+
+@bot.hybrid_command(name="checkdeals", aliases=["cd"], description="Admin: View pending club deals.")
+@commands.has_permissions(administrator=True)
+async def checkdeals(ctx):
+    # This command is retained for legacy Club buying support. New Shop Approvals are separate.
+    deals = list(pending_deals_col.find().sort("timestamp", 1))
+    if not deals: return await ctx.send(embed=create_embed(f"{E_SUCCESS} All Clear", "No pending deals.", 0x2ecc71))
+    data = []
+    for d in deals:
+        buyer_display = d['buyer_id'].replace("group:", "Group: ").title() if "group:" in d['buyer_id'] else f"<@{d['buyer_id']}>"
+        data.append((f"Deal #{d['id']} | {d['club_name']}", f"{E_MONEY} **Price:** ${d['price']:,}\n{E_CROWN} **Buyer:** {buyer_display}"))
+    view = Paginator(ctx, data, f"{E_ADMIN} Pending Club Approvals", 0xe67e22, 5)
+    await ctx.send(embed=view.get_embed(), view=view)
+
 @bot.hybrid_command(name="managedeal", aliases=["md"], description="Admin: Approve or Reject a deal.")
 @commands.has_permissions(administrator=True)
 async def managedeal(ctx, deal_id: int, action: str):
@@ -1244,19 +1259,6 @@ async def managedeal(ctx, deal_id: int, action: str):
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Approved", f"Deal #{deal_id} approved. Ownership transferred.", 0x2ecc71))
 
 
-
-@bot.hybrid_command(name="checkdeals", aliases=["cd"], description="Admin: View pending club deals.")
-@commands.has_permissions(administrator=True)
-async def checkdeals(ctx):
-    # This command is retained for legacy Club buying support. New Shop Approvals are separate.
-    deals = list(pending_deals_col.find().sort("timestamp", 1))
-    if not deals: return await ctx.send(embed=create_embed(f"{E_SUCCESS} All Clear", "No pending deals.", 0x2ecc71))
-    data = []
-    for d in deals:
-        buyer_display = d['buyer_id'].replace("group:", "Group: ").title() if "group:" in d['buyer_id'] else f"<@{d['buyer_id']}>"
-        data.append((f"Deal #{d['id']} | {d['club_name']}", f"{E_MONEY} **Price:** ${d['price']:,}\n{E_CROWN} **Buyer:** {buyer_display}"))
-    view = Paginator(ctx, data, f"{E_ADMIN} Pending Club Approvals", 0xe67e22, 5)
-    await ctx.send(embed=view.get_embed(), view=view)
 
 # ===========================
 #   GROUP 5: GIVEAWAYS
@@ -1943,6 +1945,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
