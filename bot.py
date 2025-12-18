@@ -952,6 +952,121 @@ async def deductsalary(ctx, duelist_id: int, confirm: str):
     log_user_activity(d["discord_user_id"], "Penalty", f"Fined ${penalty:,} for missed match.")
     await ctx.send(embed=create_embed(f"{E_ALERT} Penalty", f"Fined **${penalty:,}** from **{d['username']}**'s wallet.", 0xff0000))
 
+# ==============================================================================
+#  MISSING FEATURE: CLUB DEAL APPROVAL SYSTEM
+# ==============================================================================
+
+@bot.hybrid_command(name="buyclub", aliases=["bc"], description="Request to buy an unowned club (Requires Admin Approval).")
+async def buyclub(ctx, club_name: str):
+    # 1. Find Club
+    c = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    if not c: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
+    if c.get("owner_id"): return await ctx.send(embed=create_embed("Error", f"{E_DANGER} This club is already owned.", 0xff0000))
+    
+    # 2. Check Ownership Limit
+    prof = profiles_col.find_one({"user_id": str(ctx.author.id)})
+    if prof and prof.get("owned_club_id"): return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You already own a club.", 0xff0000))
+    
+    # 3. Check Funds
+    price = c["value"]
+    w = get_wallet(ctx.author.id)
+    if not w or w.get("balance", 0) < price: return await ctx.send(embed=create_embed("Insufficient Funds", f"{E_ERROR} You need **${price:,}**.", 0xff0000))
+    
+    # 4. Deduct & Hold Funds
+    wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": -price}})
+    
+    # 5. Create Pending Deal
+    deal_id = get_next_id("deal_id")
+    # Note: We use the 'market_col' or a new 'pending_deals' collection. 
+    # Using 'market_col' with a specific type is cleaner.
+    db.pending_deals.insert_one({
+        "id": deal_id,
+        "type": "club_buy",
+        "buyer_id": str(ctx.author.id),
+        "club_id": c["id"],
+        "club_name": c["name"],
+        "price": price,
+        "timestamp": datetime.now()
+    })
+    
+    # 6. Notify
+    embed = discord.Embed(title=f"{E_TIMER} Deal Pending #{deal_id}", description=f"Request to buy **{c['name']}** submitted.\n\n{E_MONEY} **Funds Held:** ${price:,}\n{E_ADMIN} **Status:** Waiting for Admin Approval", color=0xf1c40f)
+    if c.get("logo"): embed.set_thumbnail(url=c["logo"])
+    
+    # Send Log to Pending Channel
+    log_ch = bot.get_channel(LOG_CHANNELS["pending"])
+    if log_ch: await log_ch.send(embed=embed)
+    
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="checkdeals", aliases=["cd"], description="Admin: View pending club deals.")
+@commands.has_permissions(administrator=True)
+async def checkdeals(ctx):
+    deals = list(db.pending_deals.find({"type": "club_buy"}).sort("timestamp", 1))
+    
+    if not deals: return await ctx.send(embed=create_embed(f"{E_SUCCESS} All Clear", "No pending club deals.", 0x2ecc71))
+    
+    data = []
+    for d in deals:
+        data.append((
+            f"Deal #{d['id']} | {d['club_name']}",
+            f"{E_MONEY} **Price:** ${d['price']:,}\n{E_CROWN} **Buyer:** <@{d['buyer_id']}>\n{E_TIMER} **Time:** {d['timestamp'].strftime('%Y-%m-%d %H:%M')}"
+        ))
+    
+    view = Paginator(ctx, data, f"{E_ADMIN} Pending Club Approvals", 0xe67e22, 5)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.hybrid_command(name="managedeal", aliases=["md"], description="Admin: Approve or Reject a deal.")
+@commands.has_permissions(administrator=True)
+async def managedeal(ctx, deal_id: int, action: str):
+    action = action.lower()
+    if action not in ["approve", "reject"]: return await ctx.send(embed=create_embed("Error", "Action must be `approve` or `reject`.", 0xff0000))
+    
+    deal = db.pending_deals.find_one({"id": deal_id, "type": "club_buy"})
+    if not deal: return await ctx.send(embed=create_embed("Error", "Deal ID not found.", 0xff0000))
+    
+    c = clubs_col.find_one({"id": deal['club_id']})
+    buyer_id = deal['buyer_id']
+    price = deal['price']
+    
+    if action == "reject":
+        # Refund
+        wallets_col.update_one({"user_id": buyer_id}, {"$inc": {"balance": price}})
+        db.pending_deals.delete_one({"id": deal_id})
+        
+        try: 
+            user = await bot.fetch_user(int(buyer_id))
+            await user.send(embed=create_embed(f"{E_DANGER} Deal Rejected", f"Your request to buy **{deal['club_name']}** was rejected.\n{E_MONEY} **${price:,}** has been refunded.", 0xff0000))
+        except: pass
+        
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Rejected", f"Deal #{deal_id} rejected. Funds refunded.", 0x2ecc71))
+        return
+
+    if action == "approve":
+        # Check if club was bought by someone else in the meantime
+        if c.get("owner_id"):
+            wallets_col.update_one({"user_id": buyer_id}, {"$inc": {"balance": price}}) # Refund
+            db.pending_deals.delete_one({"id": deal_id})
+            return await ctx.send(embed=create_embed("Error", "Club is already owned! Deal cancelled and refunded.", 0xff0000))
+            
+        # Transfer Ownership
+        clubs_col.update_one({"id": c["id"]}, {"$set": {"owner_id": buyer_id}})
+        profiles_col.update_one({"user_id": buyer_id}, {"$set": {"owned_club_id": c["id"], "owned_club_share": 100}}, upsert=True)
+        
+        # Log
+        log_user_activity(buyer_id, "Purchase", f"Bought {c['name']} (Approved)")
+        history_col.insert_one({"club_id": c["id"], "winner": buyer_id, "amount": price, "timestamp": datetime.now(), "type": "market_buy"})
+        
+        log_embed = create_embed(f"{E_GIVEAWAY} CLUB SOLD (Market)", f"Transfer Approved by {ctx.author.mention}\n\n{E_STAR} **Club:** {c['name']}\n{E_CROWN} **New Owner:** <@{buyer_id}>\n{E_MONEY} **Price:** ${price:,}", 0xf1c40f)
+        if c.get("logo"): log_embed.set_thumbnail(url=c['logo'])
+        await send_log("club", log_embed)
+        
+        db.pending_deals.delete_one({"id": deal_id})
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Approved", f"Deal #{deal_id} approved. Ownership transferred.", 0x2ecc71))
+
+
+
+
 # ===========================
 #   GROUP 4: ADMIN
 # ===========================
@@ -1827,6 +1942,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
