@@ -1195,6 +1195,22 @@ async def trade_remove(ctx, category: str, *, item_or_amount: str):
 
     session.confirmed = {u: False for u in session.users}
 
+@trade.command(name="cancel")
+async def trade_cancel(ctx):
+    """Cancel your active trade session."""
+    uid = str(ctx.author.id)
+    if uid not in active_trades: 
+        return await ctx.send(embed=create_embed("Error", "You are not in an active trade.", 0xff0000))
+    
+    session = active_trades[uid]
+    
+    # Clean up global state for BOTH users involved
+    for user_id in session.users:
+        if user_id in active_trades:
+            del active_trades[user_id]
+            
+    await ctx.send(embed=create_embed(f"{E_ERROR} Trade Cancelled", f"The trade session was cancelled by {ctx.author.mention}.", 0xff0000))
+
 @trade.command(name="confirm")
 async def trade_confirm(ctx):
     """Confirm your side of the trade."""
@@ -1640,6 +1656,8 @@ async def remove_inv(ctx, member: discord.Member, *, item_name: str):
         inventory_col.delete_one({"_id": item["_id"]})
     
     await ctx.send(embed=create_embed(f"{E_DANGER} Removed Item", f"Removed 1x **{item['name']}** from {member.mention}.", 0xff0000))
+
+
 
 @bot.hybrid_command(name="tradehistory", aliases=["th"], description="View a user's trade history.")
 async def tradehistory(ctx, user: discord.Member = None):
@@ -2372,6 +2390,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
