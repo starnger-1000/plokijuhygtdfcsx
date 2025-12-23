@@ -1619,16 +1619,25 @@ async def remove_pc(ctx, amount: int, member: discord.Member):
     wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"pc": -amount}}, upsert=True)
     await ctx.send(embed=create_embed(f"{E_ADMIN} Removed PC", f"Removed **{amount:,}** {E_PC} from {member.mention}.", 0xe74c3c))
 
-@remove.command(name="inv", description="Remove Item/Pokemon.")
+@remove.command(name="inv", description="Remove Item/Pokemon from user.")
 async def remove_inv(ctx, member: discord.Member, *, item_name: str):
-    # Search for item (lenient matching)
-    item = inventory_col.find_one({"user_id": str(member.id), "name": {"$regex": f"^{re.escape(item_name)}", "$options": "i"}})
-    if not item: return await ctx.send(embed=create_embed("Error", f"{member.display_name} does not have **{item_name}**.", 0xff0000))
+    # Smart Search: Find item using partial match (case insensitive)
+    # e.g., "pika" matches "Level 50 Pikachu"
+    item = inventory_col.find_one({
+        "user_id": str(member.id), 
+        "name": {"$regex": re.escape(item_name), "$options": "i"}
+    })
+    
+    if not item: 
+        return await ctx.send(embed=create_embed("Error", f"{member.display_name} does not have any item matching **{item_name}**.", 0xff0000))
     
     # Remove 1 quantity
     inventory_col.update_one({"_id": item["_id"]}, {"$inc": {"quantity": -1}})
-    # If quantity hits 0, delete the document? (Optional, keeping 0 allows history tracking if needed, but deleting is cleaner)
-    inventory_col.delete_many({"quantity": {"$lte": 0}})
+    
+    # Cleanup: If quantity reaches 0, delete the item from DB
+    updated_item = inventory_col.find_one({"_id": item["_id"]})
+    if updated_item and updated_item["quantity"] <= 0:
+        inventory_col.delete_one({"_id": item["_id"]})
     
     await ctx.send(embed=create_embed(f"{E_DANGER} Removed Item", f"Removed 1x **{item['name']}** from {member.mention}.", 0xff0000))
 
@@ -2363,6 +2372,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
