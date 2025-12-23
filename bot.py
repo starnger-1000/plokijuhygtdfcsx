@@ -871,7 +871,327 @@ async def leaderboard(ctx):
     await ctx.send(embed=view.get_embed(), view=view)
 
 
+# ==============================================================================
+#  TRADE SYSTEM (Global State & Views)
+# ==============================================================================
 
+# Global Trade State Storage
+active_trades = {}
+
+class TradeSession:
+    def __init__(self, initiator_id, target_id, channel_id):
+        self.users = [initiator_id, target_id]
+        self.channel_id = channel_id
+        self.offers = {
+            initiator_id: {"cash": 0, "sc": 0, "items": {}}, 
+            target_id: {"cash": 0, "sc": 0, "items": {}}
+        }
+        self.confirmed = {initiator_id: False, target_id: False}
+        self.finalized = False
+
+class TradeInviteView(View):
+    def __init__(self, initiator, target):
+        super().__init__(timeout=60)
+        self.initiator = initiator
+        self.target = target
+        self.accepted = False
+
+    @discord.ui.button(label="Accept Trade", style=discord.ButtonStyle.success, emoji=E_GOLD_TICK)
+    async def accept(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.target.id:
+            return await interaction.response.send_message("This trade request is not for you.", ephemeral=True)
+        
+        self.accepted = True
+        # Initialize Session
+        session = TradeSession(str(self.initiator.id), str(self.target.id), interaction.channel.id)
+        active_trades[str(self.initiator.id)] = session
+        active_trades[str(self.target.id)] = session
+        
+        embed = create_embed(f"{E_AUCTION} Trade Active", 
+                             f"Trade started between {self.initiator.mention} and {self.target.mention}!\n\n"
+                             f"**Commands:**\n"
+                             f"`.trade add $ 500` (Add Cash)\n"
+                             f"`.trade add sc 100` (Add Shiny Coins)\n"
+                             f"`.trade add inv <Item Name>` (Add Item/Pokemon)\n"
+                             f"`.trade remove ...` (Remove anything)\n"
+                             f"`.trade confirm` (Lock in your offer)", 
+                             0x2ecc71)
+        
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
+        self.stop()
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, emoji=E_ERROR)
+    async def reject(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.target.id and interaction.user.id != self.initiator.id: return
+        await interaction.response.edit_message(content=f"{E_ERROR} Trade rejected/cancelled.", embed=None, view=None)
+        self.stop()
+
+class TradeFinalView(View):
+    def __init__(self, session):
+        super().__init__(timeout=60)
+        self.session = session
+
+    @discord.ui.button(label="Confirm Deal", style=discord.ButtonStyle.success, emoji=E_GOLD_TICK)
+    async def confirm_deal(self, interaction: discord.Interaction, button: Button):
+        uid = str(interaction.user.id)
+        if uid not in self.session.users: return
+        
+        # Mark user as final confirmed (reuse the confirmed dict or add a new flag, here we just check logic inside)
+        # For simplicity, we process immediately if both click, or wait. 
+        # But to prevent race conditions, we'll execute logic only once.
+        
+        if self.session.finalized: return await interaction.response.send_message("Trade already finalizing...", ephemeral=True)
+        
+        # We need a way to track double clicks on this specific view. 
+        # Let's use the button's style or a local list.
+        if not hasattr(self, 'final_clicks'): self.final_clicks = []
+        if uid in self.final_clicks: return await interaction.response.send_message("You already confirmed.", ephemeral=True)
+        
+        self.final_clicks.append(uid)
+        await interaction.response.send_message(f"{E_SUCCESS} {interaction.user.display_name} confirmed!", ephemeral=True)
+
+        if len(self.final_clicks) == 2:
+            self.session.finalized = True
+            await self.execute_trade(interaction)
+
+    async def execute_trade(self, interaction):
+        # 1. Re-verify everything (Security Check)
+        for uid in self.session.users:
+            offer = self.session.offers[uid]
+            w = get_wallet(uid)
+            
+            # Check Currency
+            if w.get("balance", 0) < offer["cash"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Cash funds! Trade Cancelled.")
+            if w.get("shiny_coins", 0) < offer["sc"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Shiny Coins! Trade Cancelled.")
+            
+            # Check Items
+            for item_name, qty_needed in offer["items"].items():
+                inv_item = inventory_col.find_one({"user_id": uid, "name": item_name})
+                if not inv_item or inv_item.get("quantity", 0) < qty_needed:
+                    return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing **{item_name}**! Trade Cancelled.")
+
+        # 2. Execute Transfers
+        u1, u2 = self.session.users[0], self.session.users[1]
+        
+        # Function to transfer assets from sender to receiver
+        def transfer_assets(sender, receiver):
+            offer = self.session.offers[sender]
+            
+            # Currency
+            if offer["cash"] > 0:
+                wallets_col.update_one({"user_id": sender}, {"$inc": {"balance": -offer["cash"]}})
+                wallets_col.update_one({"user_id": receiver}, {"$inc": {"balance": offer["cash"]}}, upsert=True)
+            if offer["sc"] > 0:
+                wallets_col.update_one({"user_id": sender}, {"$inc": {"shiny_coins": -offer["sc"]}})
+                wallets_col.update_one({"user_id": receiver}, {"$inc": {"shiny_coins": offer["sc"]}}, upsert=True)
+            
+            # Items
+            for item_name, qty in offer["items"].items():
+                # Remove from Sender
+                sender_item = inventory_col.find_one({"user_id": sender, "name": item_name})
+                inventory_col.update_one({"_id": sender_item["_id"]}, {"$inc": {"quantity": -qty}})
+                
+                # Add to Receiver
+                # We need the item_id and type to upsert correctly.
+                item_id = sender_item['item_id']
+                item_type = sender_item.get('type', 'Item')
+                
+                # If Pokemon, we might need to update ownership in pokemon_col too if unique
+                # Assuming inventory quantity based, we just move quantity.
+                inventory_col.update_one(
+                    {"user_id": receiver, "item_id": item_id},
+                    {"$inc": {"quantity": qty}, "$set": {"name": item_name, "type": item_type}},
+                    upsert=True
+                )
+                
+                # Special Pokemon Owner Update (If tracking unique ownership)
+                if item_type == "Pokemon":
+                    # Update owner_id in pokemon_col for these specific instances? 
+                    # Complex with quantity. For this system, we rely on inventory_col ownership.
+                    pass
+
+        # Execute Swap
+        transfer_assets(u1, u2)
+        transfer_assets(u2, u1)
+
+        # Cleanup
+        del active_trades[u1]
+        del active_trades[u2]
+        
+        await interaction.channel.send(embed=create_embed(f"{E_SUCCESS} Trade Complete!", "All items and currencies have been transferred.", 0x2ecc71))
+        self.stop()
+
+    @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji=E_ERROR)
+    async def cancel_trade(self, interaction: discord.Interaction, button: Button):
+        for uid in self.session.users:
+            if uid in active_trades: del active_trades[uid]
+        await interaction.response.edit_message(content=f"{E_DANGER} Trade cancelled by {interaction.user.mention}.", embed=None, view=None)
+        self.stop()
+
+# ==============================================================================
+#  TRADE COMMAND GROUP
+# ==============================================================================
+
+@bot.group(name="trade", invoke_without_command=True)
+async def trade(ctx, target: discord.Member):
+    """Start a trade with another user."""
+    if target.id == ctx.author.id: return await ctx.send(embed=create_embed("Error", "You cannot trade with yourself.", 0xff0000))
+    if target.bot: return await ctx.send(embed=create_embed("Error", "You cannot trade with bots.", 0xff0000))
+    
+    if str(ctx.author.id) in active_trades: return await ctx.send(embed=create_embed("Error", "You are already in a trade.", 0xff0000))
+    if str(target.id) in active_trades: return await ctx.send(embed=create_embed("Error", f"{target.display_name} is already in a trade.", 0xff0000))
+
+    view = TradeInviteView(ctx.author, target)
+    await ctx.send(f"{target.mention}, {ctx.author.mention} wants to trade with you!", view=view)
+
+@trade.command(name="add")
+async def trade_add(ctx, category: str, *, item_or_amount: str):
+    """Add items or currency. Usage: .trade add $ 500 | .trade add inv Pikachu"""
+    uid = str(ctx.author.id)
+    if uid not in active_trades: return await ctx.send("You are not in a trade.")
+    session = active_trades[uid]
+    
+    # 1. Parse Input
+    category = category.lower()
+    
+    # --- CURRENCY ---
+    if category in ["$", "money", "cash"]:
+        try: amount = int(item_or_amount.replace(",", "").replace("k", "000").replace("m", "000000"))
+        except: return await ctx.send("Invalid amount.")
+        if amount <= 0: return
+        
+        w = get_wallet(ctx.author.id)
+        current_bal = w.get("balance", 0) if w else 0
+        current_offer = session.offers[uid]["cash"]
+        
+        if (current_bal - current_offer) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient Cash in wallet.", 0xff0000))
+        
+        session.offers[uid]["cash"] += amount
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"Added {E_MONEY} ${amount:,} to trade.", 0x2ecc71))
+
+    elif category in ["sc", "shiny", "coins"]:
+        try: amount = int(item_or_amount.replace(",", ""))
+        except: return await ctx.send("Invalid amount.")
+        if amount <= 0: return
+        
+        w = get_wallet(ctx.author.id)
+        current_bal = w.get("shiny_coins", 0) if w else 0
+        current_offer = session.offers[uid]["sc"]
+        
+        if (current_bal - current_offer) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient Shiny Coins.", 0xff0000))
+        
+        session.offers[uid]["sc"] += amount
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"Added {E_SHINY} {amount:,} SC to trade.", 0x2ecc71))
+        
+    # --- INVENTORY ---
+    elif category in ["inv", "item", "pokemon"]:
+        item_name = item_or_amount.strip()
+        # Find item in DB
+        # Look for regex match to be lenient
+        item = inventory_col.find_one({"user_id": uid, "name": {"$regex": f"^{re.escape(item_name)}$", "$options": "i"}})
+        
+        if not item or item.get("quantity", 0) <= 0:
+            return await ctx.send(embed=create_embed("Error", f"You do not own **{item_name}**.", 0xff0000))
+        
+        # Check if already offered max amount
+        current_offer_qty = session.offers[uid]["items"].get(item['name'], 0)
+        if (item['quantity'] - current_offer_qty) < 1:
+            return await ctx.send(embed=create_embed("Error", f"You don't have enough **{item['name']}** left to add.", 0xff0000))
+            
+        # Add to offer
+        if item['name'] in session.offers[uid]["items"]:
+            session.offers[uid]["items"][item['name']] += 1
+        else:
+            session.offers[uid]["items"][item['name']] = 1
+            
+        await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"Added 1x **{item['name']}** to trade.", 0x2ecc71))
+        
+    else:
+        await ctx.send("Invalid category. Use `$`, `sc`, or `inv`.")
+        
+    # Reset confirmations if deal changes
+    session.confirmed = {u: False for u in session.users}
+
+@trade.command(name="remove")
+async def trade_remove(ctx, category: str, *, item_or_amount: str):
+    """Remove items or currency from trade."""
+    uid = str(ctx.author.id)
+    if uid not in active_trades: return
+    session = active_trades[uid]
+    category = category.lower()
+    
+    if category in ["$", "cash"]:
+        try: amount = int(item_or_amount.replace(",", "").replace("k", "000"))
+        except: return
+        if session.offers[uid]["cash"] >= amount:
+            session.offers[uid]["cash"] -= amount
+            await ctx.send(embed=create_embed(f"{E_DANGER} Removed", f"Removed ${amount:,} Cash.", 0xff0000))
+            
+    elif category in ["sc", "shiny"]:
+        try: amount = int(item_or_amount.replace(",", ""))
+        except: return
+        if session.offers[uid]["sc"] >= amount:
+            session.offers[uid]["sc"] -= amount
+            await ctx.send(embed=create_embed(f"{E_DANGER} Removed", f"Removed {amount:,} SC.", 0xff0000))
+            
+    elif category in ["inv", "item"]:
+        name = item_or_amount.strip()
+        # Find exact name match in current offers
+        found_key = None
+        for key in session.offers[uid]["items"]:
+            if name.lower() == key.lower():
+                found_key = key
+                break
+        
+        if found_key:
+            session.offers[uid]["items"][found_key] -= 1
+            if session.offers[uid]["items"][found_key] <= 0:
+                del session.offers[uid]["items"][found_key]
+            await ctx.send(embed=create_embed(f"{E_DANGER} Removed", f"Removed 1x **{found_key}**.", 0xff0000))
+        else:
+            await ctx.send("Item not found in current offer.")
+
+    session.confirmed = {u: False for u in session.users}
+
+@trade.command(name="confirm")
+async def trade_confirm(ctx):
+    """Confirm your side of the trade."""
+    uid = str(ctx.author.id)
+    if uid not in active_trades: return
+    session = active_trades[uid]
+    
+    session.confirmed[uid] = True
+    await ctx.send(embed=create_embed(f"{E_GOLD_TICK} Confirmed", f"{ctx.author.mention} has confirmed the trade offer.", 0xf1c40f))
+    
+    # Check if both confirmed
+    if all(session.confirmed.values()):
+        # Show Final Summary
+        u1, u2 = session.users[0], session.users[1]
+        
+        def format_offer(user_id):
+            o = session.offers[user_id]
+            txt = ""
+            if o["cash"] > 0: txt += f"{E_MONEY} ${o['cash']:,}\n"
+            if o["sc"] > 0: txt += f"{E_SHINY} {o['sc']:,} SC\n"
+            for name, qty in o["items"].items():
+                txt += f"{E_ITEMBOX} {name} x{qty}\n"
+            return txt if txt else "*Nothing*"
+
+        desc = f"**Trade Summary:**\n\n**<@{u1}> Offers:**\n{format_offer(u1)}\n\n**<@{u2}> Offers:**\n{format_offer(u2)}"
+        
+        view = TradeFinalView(session)
+        await ctx.send(embed=create_embed(f"{E_STARS} Final Confirmation", desc, 0x3498db), view=view)
+
+@trade.command(name="cancel")
+async def trade_cancel(ctx):
+    uid = str(ctx.author.id)
+    if uid in active_trades:
+        session = active_trades[uid]
+        for u in session.users:
+            if u in active_trades: del active_trades[u]
+        await ctx.send(embed=create_embed(f"{E_ERROR} Trade Cancelled", "Trade session ended.", 0xff0000))
+    else:
+        await ctx.send("No active trade.")
 
 
 @bot.hybrid_command(name="registerduelist", aliases=["rd"], description="Register as duelist.")
@@ -1919,6 +2239,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
