@@ -1554,6 +1554,88 @@ async def managedeal(ctx, deal_id: str, action: str):
 
     # 4. UNKNOWN DEAL TYPE HANDLER
     await ctx.send(embed=create_embed("Error", f"Unknown deal type: `{deal.get('type')}`\nID: {deal_id}", 0xff0000))
+
+# ==============================================================================
+#  NEW ADMIN COMMANDS: REMOVALS & HISTORY
+# ==============================================================================
+
+@bot.group(name="remove", description="Admin: Remove assets from users.")
+@commands.has_permissions(administrator=True)
+async def remove(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send(embed=create_embed("Error", f"Usage:\n`.remove sh <amt> @User`\n`.remove pc <amt> @User`\n`.remove inv <Item> @User`", 0xff0000))
+
+@remove.command(name="sh", description="Remove Shiny Coins.")
+async def remove_sh(ctx, amount: int, member: discord.Member):
+    if amount <= 0: return await ctx.send(embed=create_embed("Error", "Invalid amount.", 0xff0000))
+    wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"shiny_coins": -amount}}, upsert=True)
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Removed SC", f"Removed **{amount:,}** {E_SHINY} from {member.mention}.", 0xe74c3c))
+
+@remove.command(name="pc", description="Remove PokeCoins.")
+async def remove_pc(ctx, amount: int, member: discord.Member):
+    if amount <= 0: return await ctx.send(embed=create_embed("Error", "Invalid amount.", 0xff0000))
+    wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"pc": -amount}}, upsert=True)
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Removed PC", f"Removed **{amount:,}** {E_PC} from {member.mention}.", 0xe74c3c))
+
+@remove.command(name="inv", description="Remove Item/Pokemon.")
+async def remove_inv(ctx, member: discord.Member, *, item_name: str):
+    # Search for item (lenient matching)
+    item = inventory_col.find_one({"user_id": str(member.id), "name": {"$regex": f"^{re.escape(item_name)}", "$options": "i"}})
+    if not item: return await ctx.send(embed=create_embed("Error", f"{member.display_name} does not have **{item_name}**.", 0xff0000))
+    
+    # Remove 1 quantity
+    inventory_col.update_one({"_id": item["_id"]}, {"$inc": {"quantity": -1}})
+    # If quantity hits 0, delete the document? (Optional, keeping 0 allows history tracking if needed, but deleting is cleaner)
+    inventory_col.delete_many({"quantity": {"$lte": 0}})
+    
+    await ctx.send(embed=create_embed(f"{E_DANGER} Removed Item", f"Removed 1x **{item['name']}** from {member.mention}.", 0xff0000))
+
+@bot.hybrid_command(name="tradehistory", aliases=["th"], description="View a user's trade history.")
+async def tradehistory(ctx, user: discord.Member = None):
+    target = user or ctx.author
+    uid = str(target.id)
+    
+    # Need to initialize this collection in Part 1 if not done: trade_history_col = db.trade_history
+    trades = list(db.trade_history.find({"users": uid}).sort("timestamp", -1).limit(10))
+    
+    if not trades: 
+        return await ctx.send(embed=create_embed(f"{E_BOOK} History", f"No trade history found for {target.display_name}.", 0x95a5a6))
+    
+    data = []
+    for t in trades:
+        u1, u2 = t['users']
+        other_id = u2 if u1 == uid else u1
+        ts = t['timestamp'].strftime('%Y-%m-%d')
+        
+        # Format the deal summary
+        details = f"**Partner:** <@{other_id}>\n"
+        details += f"**Received:** {t['offers'][other_id]}\n"
+        details += f"**Given:** {t['offers'][uid]}"
+        
+        data.append((f"{E_AUCTION} Trade on {ts}", details))
+        
+    view = Paginator(ctx, data, f"{E_BOOK} Trade History: {target.display_name}", 0x3498db)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.hybrid_command(name="servertradehistory", aliases=["sth"], description="View global server trade logs.")
+async def servertradehistory(ctx):
+    trades = list(db.trade_history.find().sort("timestamp", -1).limit(15))
+    
+    if not trades: return await ctx.send(embed=create_embed("Server History", "No trades recorded yet.", 0x95a5a6))
+    
+    data = []
+    for t in trades:
+        u1, u2 = t['users']
+        ts = t['timestamp'].strftime('%Y-%m-%d %H:%M')
+        
+        details = f"<@{u1}> ↔️ <@{u2}>\n"
+        details += f"**{t['summary']}**" # We will save a short summary string
+        
+        data.append((f"{E_AUCTION} Trade | {ts}", details))
+        
+    view = Paginator(ctx, data, f"{E_STARS} Server Trade Logs", 0xf1c40f)
+    await ctx.send(embed=view.get_embed(), view=view)
+
 # ===========================
 #   GROUP 5: GIVEAWAYS
 # ===========================
@@ -2239,6 +2321,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
