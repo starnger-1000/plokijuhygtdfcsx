@@ -963,7 +963,29 @@ class TradeFinalView(View):
             # Check Currency
             if w.get("balance", 0) < offer["cash"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Cash funds! Trade Cancelled.")
             if w.get("shiny_coins", 0) < offer["sc"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Shiny Coins! Trade Cancelled.")
-            
+
+            # --- LOGGING TO HISTORY (Add this block) ---
+        
+        # Helper to stringify an offer
+        def offer_to_str(uid):
+            o = self.session.offers[uid]
+            parts = []
+            if o["cash"]: parts.append(f"${o['cash']:,}")
+            if o["sc"]: parts.append(f"{o['sc']:,} SC")
+            for n, q in o["items"].items(): parts.append(f"{n} x{q}")
+            return ", ".join(parts) if parts else "Nothing"
+
+        u1_offer_str = offer_to_str(u1)
+        u2_offer_str = offer_to_str(u2)
+
+        db.trade_history.insert_one({
+            "users": [u1, u2],
+            "offers": {u1: u1_offer_str, u2: u2_offer_str},
+            "summary": f"[{u1_offer_str}] ↔️ [{u2_offer_str}]",
+            "timestamp": datetime.now()
+        })
+        
+        # --- END LOGGING BLOCK ---
             # Check Items
             for item_name, qty_needed in offer["items"].items():
                 inv_item = inventory_col.find_one({"user_id": uid, "name": item_name})
@@ -2321,6 +2343,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
