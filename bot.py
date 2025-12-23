@@ -155,6 +155,22 @@ active_timers = {}
 bidding_frozen = False
 
 # ---------- HELPER CLASSES ----------
+def get_wallet(user_id):
+    """Smart Wallet Fetcher (Handles String/Int IDs & Syncs)"""
+    if db is None: return None
+    # 1. Try Finding by String ID (Standard)
+    w = wallets_col.find_one({"user_id": str(user_id)})
+    if w: return w
+    # 2. Try Finding by Integer ID (Legacy)
+    w = wallets_col.find_one({"user_id": int(user_id)})
+    if w:
+        # Auto-Migrate to String
+        wallets_col.update_one({"_id": w["_id"]}, {"$set": {"user_id": str(user_id)}})
+        return w
+    # 3. Create if missing (Default)
+    new_wallet = {"user_id": str(user_id), "balance": 0, "shiny_coins": 0, "pc": 0}
+    wallets_col.insert_one(new_wallet)
+    return new_wallet
 class HumanInt(commands.Converter):
     async def convert(self, ctx, argument):
         try:
@@ -2343,6 +2359,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
