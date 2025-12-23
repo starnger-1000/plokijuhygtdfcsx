@@ -963,8 +963,7 @@ class TradeFinalView(View):
             # Check Currency
             if w.get("balance", 0) < offer["cash"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Cash funds! Trade Cancelled.")
             if w.get("shiny_coins", 0) < offer["sc"]: return await interaction.channel.send(f"{E_ERROR} <@{uid}> is missing Shiny Coins! Trade Cancelled.")
-
-            # --- LOGGING TO HISTORY (Add this block) ---
+                # --- LOGGING TO HISTORY (Add this block) ---
         
         # Helper to stringify an offer
         def offer_to_str(uid):
@@ -2343,6 +2342,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
