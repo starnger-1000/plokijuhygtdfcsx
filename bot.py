@@ -1098,8 +1098,8 @@ async def trade_add(ctx, category: str, *, item_or_amount: str):
         except: return await ctx.send("Invalid amount.")
         if amount <= 0: return
         
-        w = get_wallet(ctx.author.id)
-        current_bal = w.get("balance", 0) if w else 0
+        w = get_wallet(ctx.author.id) # This will work now
+        current_bal = w.get("balance", 0)
         current_offer = session.offers[uid]["cash"]
         
         if (current_bal - current_offer) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient Cash in wallet.", 0xff0000))
@@ -1113,7 +1113,7 @@ async def trade_add(ctx, category: str, *, item_or_amount: str):
         if amount <= 0: return
         
         w = get_wallet(ctx.author.id)
-        current_bal = w.get("shiny_coins", 0) if w else 0
+        current_bal = w.get("shiny_coins", 0)
         current_offer = session.offers[uid]["sc"]
         
         if (current_bal - current_offer) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient Shiny Coins.", 0xff0000))
@@ -1121,20 +1121,24 @@ async def trade_add(ctx, category: str, *, item_or_amount: str):
         session.offers[uid]["sc"] += amount
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"Added {E_SHINY} {amount:,} SC to trade.", 0x2ecc71))
         
-    # --- INVENTORY ---
+    # --- INVENTORY (Smart Search) ---
     elif category in ["inv", "item", "pokemon"]:
-        item_name = item_or_amount.strip()
-        # Find item in DB
-        # Look for regex match to be lenient
-        item = inventory_col.find_one({"user_id": uid, "name": {"$regex": f"^{re.escape(item_name)}$", "$options": "i"}})
+        item_search = item_or_amount.strip()
         
-        if not item or item.get("quantity", 0) <= 0:
-            return await ctx.send(embed=create_embed("Error", f"You do not own **{item_name}**.", 0xff0000))
+        # FIX: Find item using partial match (case insensitive)
+        item = inventory_col.find_one({
+            "user_id": uid, 
+            "name": {"$regex": re.escape(item_search), "$options": "i"},
+            "quantity": {"$gt": 0}
+        })
         
-        # Check if already offered max amount
+        if not item:
+            return await ctx.send(embed=create_embed("Error", f"Could not find **{item_search}** in your inventory.", 0xff0000))
+        
+        # Check quantity limits
         current_offer_qty = session.offers[uid]["items"].get(item['name'], 0)
         if (item['quantity'] - current_offer_qty) < 1:
-            return await ctx.send(embed=create_embed("Error", f"You don't have enough **{item['name']}** left to add.", 0xff0000))
+            return await ctx.send(embed=create_embed("Error", f"You don't have enough **{item['name']}** left.", 0xff0000))
             
         # Add to offer
         if item['name'] in session.offers[uid]["items"]:
@@ -1147,7 +1151,6 @@ async def trade_add(ctx, category: str, *, item_or_amount: str):
     else:
         await ctx.send("Invalid category. Use `$`, `sc`, or `inv`.")
         
-    # Reset confirmations if deal changes
     session.confirmed = {u: False for u in session.users}
 
 @trade.command(name="remove")
@@ -1172,12 +1175,13 @@ async def trade_remove(ctx, category: str, *, item_or_amount: str):
             session.offers[uid]["sc"] -= amount
             await ctx.send(embed=create_embed(f"{E_DANGER} Removed", f"Removed {amount:,} SC.", 0xff0000))
             
-    elif category in ["inv", "item"]:
-        name = item_or_amount.strip()
-        # Find exact name match in current offers
+    elif category in ["inv", "item", "pokemon"]:
+        name_search = item_or_amount.strip().lower()
         found_key = None
+        
+        # Smart find in current offers
         for key in session.offers[uid]["items"]:
-            if name.lower() == key.lower():
+            if name_search in key.lower():
                 found_key = key
                 break
         
@@ -2359,6 +2363,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
