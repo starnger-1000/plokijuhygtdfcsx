@@ -442,7 +442,7 @@ async def daily(ctx):
     
     wallets_col.update_one(
         {"user_id": str(ctx.author.id)}, 
-        {"$inc": {"balance": 10000, "shiny_coins": 5}, "$set": {"last_daily": datetime.now()}}, 
+        {"$inc": {"balance": 150000, "shiny_coins": 50}, "$set": {"last_daily": datetime.now()}}, 
         upsert=True
     )
     await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Daily Claimed", f"You received:\n+$10,000 {E_MONEY}\n+5 {E_SHINY}", 0x2ecc71))
@@ -2375,6 +2375,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
