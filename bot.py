@@ -273,6 +273,15 @@ def resolve_emoji(item):
 def log_user_activity(user_id, type, description):
     if db is not None: activities_col.insert_one({"user_id": str(user_id), "type": type, "description": description, "timestamp": datetime.now()})
 
+def log_past_entity(user_id, type, name):
+    if db is not None: 
+        past_entities_col.insert_one({
+            "user_id": str(user_id), 
+            "type": type, 
+            "name": name, 
+            "timestamp": datetime.now()
+        })
+
 async def send_log(channel_key, embed):
     if db is None: return
     cid = LOG_CHANNELS.get(channel_key)
@@ -2375,6 +2384,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
