@@ -14,6 +14,15 @@ from discord.ext import commands
 from discord.ui import View, Button, Select
 from pymongo import MongoClient, ReturnDocument
 import certifi
+from fastapi import FastAPI
+import uvicorn
+
+app = FastAPI()
+
+@app.get("/")
+async def health():
+    return {"status": "running"}
+
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -2384,6 +2393,7 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
 
     bot.run(DISCORD_TOKEN)
+
 
 
 
