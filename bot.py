@@ -14,6 +14,9 @@ from discord.ext import commands
 from discord.ui import View, Button, Select
 from pymongo import MongoClient, ReturnDocument
 import certifi
+from fastapi import FastAPI
+import uvicorn
+import threading
 
 
 
@@ -2383,9 +2386,29 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.BadArgument): await ctx.send(embed=create_embed("Error", str(error), 0xff0000))
     else: print(error)
 
-if __name__ == "__main__":
+# ==============================================================================
+#  RENDER PORT BINDING (Fix for "No open ports detected")
+# ==============================================================================
 
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"Status": "Bot is Online!"}
+
+def run_web_server():
+    # Render assigns a specific PORT, we must listen to it
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    # 1. Start the fake web server in the background
+    t = threading.Thread(target=run_web_server)
+    t.start()
+    
+    # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
