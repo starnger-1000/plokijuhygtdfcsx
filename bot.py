@@ -144,13 +144,15 @@ def get_next_id(sequence_name):
     return ret['seq']
 
 # ---------- BOT SETUP ----------
-DEFAULT_PREFIX = "."
+# ---------- BOT SETUP & HELPERS ----------
+# Global variable to store prefix in memory
+cached_prefix = "." 
+
 def get_prefix(bot, message):
-    if db is None: return DEFAULT_PREFIX
-    try:
-        res = config_col.find_one({"key": "prefix"})
-        return res["value"] if res else DEFAULT_PREFIX
-    except: return DEFAULT_PREFIX
+    # Read from memory instantly instead of waiting for database
+    return cached_prefix
+
+# ... (Intents and bot init remain same) ...
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1377,11 +1379,13 @@ async def deleteclub(ctx, club_name: str):
     duelists_col.update_many({"club_id": c['id']}, {"$set": {"club_id": None, "owned_by": None}})
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Deleted", f"Club **{club_name}** removed.", 0xff0000))
 
-@bot.hybrid_command(name="setprefix", aliases=["sp"], description="Admin: Change prefix.")
+@bot.hybrid_command(name="setprefix", description="Set prefix.")
 @commands.has_permissions(administrator=True)
-async def setprefix(ctx, new_prefix: str):
-    config_col.update_one({"key": "prefix"}, {"$set": {"value": new_prefix}}, upsert=True)
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Prefix Updated", f"New prefix: **`{new_prefix}`**", 0x2ecc71))
+async def setprefix(ctx, p: str):
+    global cached_prefix
+    config_col.update_one({"key": "prefix"}, {"$set": {"value": p}}, upsert=True)
+    cached_prefix = p # Update memory immediately
+    await ctx.send(f"Prefix set to: {p}")
 
 @bot.hybrid_command(name="registerbattle", aliases=["rb"], description="Admin: Create match.")
 @commands.has_permissions(administrator=True)
@@ -2371,12 +2375,29 @@ async def botinfo(ctx):
 # ---------- RUN ----------
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (Build v5.8)")
-    try: await bot.tree.sync()
-    except Exception as e: print(f"Tree Sync Error: {e}")
-    if not hasattr(bot, 'started'):
-        bot.loop.create_task(market_simulation_task())
-        bot.started = True
+    global cached_prefix
+    print(f"Logged in as {bot.user}")
+    
+    # 1. Load Prefix Once
+    try:
+        if db is not None:
+            res = config_col.find_one({"key": "prefix"})
+            if res:
+                cached_prefix = res["value"]
+                print(f"Loaded Prefix: {cached_prefix}")
+    except Exception as e:
+        print(f"Database Error: {e}")
+
+    # 2. Sync Commands & Start Tasks
+    try:
+        await bot.tree.sync()
+        bot.add_view(GiveawayView()) 
+        bot.add_view(ShopView())
+        bot.add_view(BotInfoView())
+        if not hasattr(bot, 'market_task_started'):
+            bot.loop.create_task(market_simulation_task())
+            bot.market_task_started = True
+    except Exception as e: print(e)
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -2408,6 +2429,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
