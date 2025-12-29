@@ -342,6 +342,12 @@ async def on_message(message):
         )
     await bot.process_commands(message)
 
+def get_group_total_shares(group_name):
+    """Calculates total shares owned in a group."""
+    if db is None: return 0
+    members = list(group_members_col.find({"group_name": group_name.lower()}))
+    return sum(m.get("share_percentage", 0) for m in members)
+
 # ===========================
 #   GROUP 1: ECONOMY & PROFILE
 # ===========================
@@ -492,24 +498,57 @@ async def groupinfo(ctx, *, group_name: str):
     embed.add_field(name="Clubs Owned", value=", ".join(clist) or "None", inline=False)
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="creategroup", aliases=["cg"], description="Create a new investment group.")
+@bot.hybrid_command(name="creategroup", description="Create a new investment group.")
 async def creategroup(ctx, name: str, share: int):
     gname = name.lower()
-    if groups_col.find_one({"name": gname}): return await ctx.send(embed=create_embed("Error", "Group exists.", 0xff0000))
+    
+    # 1. Check if group exists
+    if groups_col.find_one({"name": gname}): 
+        return await ctx.send(embed=create_embed("Error", f"Group **{name}** already exists.", 0xff0000))
+    
+    # 2. Logic Check: Can't start with > 100%
+    if share < 1 or share > 100:
+        return await ctx.send(embed=create_embed("Error", "Share must be between 1% and 100%.", 0xff0000))
+
     logo_url = ctx.message.attachments[0].url if ctx.message.attachments else ""
+    
+    # 3. Create
     groups_col.insert_one({"name": gname, "funds": 0, "owner_id": str(ctx.author.id), "logo": logo_url})
     group_members_col.insert_one({"group_name": gname, "user_id": str(ctx.author.id), "share_percentage": share})
+    
     log_user_activity(ctx.author.id, "Group", f"Created group {name}.")
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Group Created", f"Group **{name}** created with **{share}%** share.", 0x2ecc71, thumbnail=logo_url))
+    
+    remaining = 100 - share
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Group Created", f"Group **{name}** created.\nYou own **{share}%**.\n**{remaining}%** shares available for others.", 0x2ecc71, thumbnail=logo_url))
 
-@bot.hybrid_command(name="joingroup", aliases=["jg"], description="Join an existing group.")
+@bot.hybrid_command(name="joingroup", description="Join an existing group.")
 async def joingroup(ctx, name: str, share: int):
     gname = name.lower()
-    if not groups_col.find_one({"name": gname}): return await ctx.send(embed=create_embed("Error", "Group not found.", 0xff0000))
-    if group_members_col.find_one({"group_name": gname, "user_id": str(ctx.author.id)}): return await ctx.send(embed=create_embed("Error", "Already a member.", 0xff0000))
+    
+    # 1. Check if group exists
+    if not groups_col.find_one({"name": gname}): 
+        return await ctx.send(embed=create_embed("Error", "Group not found.", 0xff0000))
+    
+    # 2. Check if already member
+    if group_members_col.find_one({"group_name": gname, "user_id": str(ctx.author.id)}): 
+        return await ctx.send(embed=create_embed("Error", "You are already a member.", 0xff0000))
+    
+    # 3. CRITICAL FIX: Check Total Shares
+    current_total = get_group_total_shares(gname)
+    available = 100 - current_total
+    
+    if share > available:
+        return await ctx.send(embed=create_embed(f"{E_DANGER} Share Limit Reached", f"This group only has **{available}%** shares available.\nYou asked for **{share}%**.", 0xff0000))
+    
+    if share <= 0:
+        return await ctx.send(embed=create_embed("Error", "Share must be positive.", 0xff0000))
+
+    # 4. Join
     group_members_col.insert_one({"group_name": gname, "user_id": str(ctx.author.id), "share_percentage": share})
     log_user_activity(ctx.author.id, "Group", f"Joined group {name}.")
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Joined", f"Joined **{name}** with **{share}%**.", 0x2ecc71))
+    
+    new_available = available - share
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Joined", f"You joined **{name}** with **{share}%** equity.\n**{new_available}%** shares remaining.", 0x2ecc71))
 
 @bot.hybrid_command(name="deposit", aliases=["dep"], description="Transfer funds to group.")
 async def deposit(ctx, group_name: str, amount: HumanInt):
@@ -1339,6 +1378,34 @@ async def deductsalary(ctx, duelist_id: int, confirm: str):
 # ===========================
 #   GROUP 4: ADMIN
 # ===========================
+
+@bot.hybrid_command(name="forcemarket", description="Admin: Force market values to update now.")
+@commands.has_permissions(administrator=True)
+async def forcemarket(ctx):
+    await ctx.defer() # Don't timeout
+    
+    updated_count = 0
+    changes_log = ""
+    
+    # Process updates
+    for c in clubs_col.find():
+        current_val = c.get("value", c.get("base_price", 0))
+        
+        # Fluctuate
+        percent_change = random.uniform(-0.03, 0.03)
+        change_amount = int(current_val * percent_change)
+        new_value = max(100, current_val + change_amount)
+        
+        clubs_col.update_one({"_id": c["_id"]}, {"$set": {"value": new_value}})
+        updated_count += 1
+        
+        # Track first few for the log
+        if updated_count <= 5:
+            icon = "📈" if change_amount >= 0 else "📉"
+            changes_log += f"{icon} **{c['name']}:** ${current_val:,} -> ${new_value:,}\n"
+
+    embed = create_embed(f"{E_STARS} Market Force Updated", f"Successfully updated values for **{updated_count}** clubs.\n\n**Sample Changes:**\n{changes_log}", 0x2ecc71)
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="registerclub", aliases=["rc"], description="Admin: Register club.")
 @commands.has_permissions(administrator=True)
@@ -2429,6 +2496,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
