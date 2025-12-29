@@ -2040,29 +2040,23 @@ async def addshinycoins(ctx, member: discord.Member, amount: int):
 @bot.hybrid_command(name="removeshopitem", aliases=["rsi", "delitem"], description="Admin: Remove an item from the shop by ID.")
 @commands.has_permissions(administrator=True)
 async def removeshopitem(ctx, item_id: str):
-    # 1. Smart Search Logic
-    # First, try to find it exactly as typed (e.g., "A157")
-    query = {"id": item_id}
-    item = shop_col.find_one(query)
+    # 1. Smart Search to confirm existence
+    item = shop_col.find_one({"id": item_id})
     
-    # If not found, and it looks like a number, try finding it as an Integer (e.g., 157)
+    # Try legacy integer search if string failed
     if not item and item_id.isdigit():
-        query = {"id": int(item_id)}
-        item = shop_col.find_one(query)
+        item = shop_col.find_one({"id": int(item_id)})
     
-    # 2. Validation
     if not item:
-        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item with ID `{item_id}` not found in the shop.", 0xff0000))
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item with ID `{item_id}` not found.", 0xff0000))
     
-    # 3. Execution
+    # 2. Delete using the unique _id found
     shop_col.delete_one({"_id": item["_id"]})
     
-    # 4. Confirmation Log
-    embed = create_embed(f"{E_DANGER} Item Deleted", f"**{item['name']}** (ID: `{item.get('id')}`) has been permanently removed.", 0xff0000)
-    
-    # Show the image of what was deleted if it existed
-    if item.get('image_url'):
-        embed.set_thumbnail(url=item['image_url'])
+    # 3. Log
+    embed = create_embed(f"{E_DANGER} Item Deleted", f"**{item['name']}** (ID: `{item['id']}`) has been removed.", 0xff0000)
+    if item.get("image_url"):
+        embed.set_thumbnail(url=item["image_url"])
         
     await ctx.send(embed=embed)
 
@@ -2352,35 +2346,55 @@ async def pinfo(ctx, item_id: str):
 async def iteminfo(ctx, *, query: str):
     # 1. Search Logic
     item = None
-    
-    # Try ID first (Your addshopitem uses Integer IDs)
-    if query.isdigit():
-        item = shop_items_col.find_one({"id": int(query)})
-    
-    # If not found by ID, try Name search (Case-insensitive)
+
+    # Priority 1: Exact String ID match (e.g. "A157")
+    item = shop_col.find_one({"id": query})
+
+    # Priority 2: Integer ID match (Legacy IDs like 157)
+    if not item and query.isdigit():
+        item = shop_col.find_one({"id": int(query)})
+
+    # Priority 3: Name search (Partial match)
     if not item:
-        item = shop_items_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
+        # Escape special regex chars to prevent errors
+        safe_query = re.escape(query)
+        item = shop_col.find_one({"name": {"$regex": f"^{safe_query}", "$options": "i"}})
         
     if not item:
-        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item not found.", 0xff0000))
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item or Box not found.", 0xff0000))
 
     # 2. Extract Data
     name = item.get('name')
     price = item.get('price')
     image_url = item.get('image_url')
+    # Default to 'Item' if category missing, capitalize first letter
     cat = item.get('category', 'item').title()
     
     # Determine Visuals
     currency = E_SHINY if item.get('currency') == 'shiny' else E_PC
     color = 0x3498db # Blue
     
+    # Custom Icons based on Category
+    icon = E_ITEMBOX
+    if "Mystery" in cat: 
+        icon = E_GIVEAWAY
+        color = 0xFF69B4 # Pink
+    elif "Pokemon" in cat: 
+        icon = E_PIKACHU
+        color = 0xe74c3c # Red
+
     # 3. Build Premium Embed
-    embed = discord.Embed(title=f"{E_ITEMBOX} {name}", description=f"**Category:** {cat}", color=color)
+    embed = discord.Embed(title=f"{icon} {name}", description=f"**Category:** {cat}", color=color)
     
     embed.add_field(name=f"{currency} Price", value=f"{price:,}", inline=True)
     embed.add_field(name=f"{E_ADMIN} Item ID", value=f"`{item['id']}`", inline=True)
     
-    # 4. Load Image (Like pinfo)
+    # Stock Display
+    stock = item.get('stock', -1)
+    stock_str = "∞ (Unlimited)" if stock == -1 else f"{stock:,}"
+    embed.add_field(name=f"{E_ITEMBOX} Stock", value=stock_str, inline=True)
+
+    # 4. Load Image (Crucial)
     if image_url:
         embed.set_thumbnail(url=image_url)
     
@@ -2664,6 +2678,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
