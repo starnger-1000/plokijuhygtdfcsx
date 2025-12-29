@@ -2251,165 +2251,140 @@ async def buy(ctx, item_id: str, coupon_code: str = None):
     
     await ctx.send(embed=create_embed(f"{E_TIMER} Request Sent", f"Purchase request submitted for **{item['name']}**.\n**Cost:** {buyer_pays:,} {emoji_curr}\n{coupon_msg}\n{E_ADMIN} Waiting for Admin Approval.", 0xf1c40f))
 
-# --- ADVANCED SHOP DROPDOWN (Final Fixed Version) ---
 class ShopSelect(Select):
-    def __init__(self):
+    def __init__(self, ctx):
         options = [
-            discord.SelectOption(label="User Market", emoji=resolve_emoji(E_AUCTION), description="Buy Pokemon from players (PC)", value="User Market"),
-            discord.SelectOption(label="Pokemon", emoji=resolve_emoji(E_PIKACHU), description="Rare/Legendary Pokemon (SC)", value="Pokemon"),
-            discord.SelectOption(label="Items", emoji=resolve_emoji(E_ITEMBOX), description="Balls, Potions, Tools (SC)", value="Items"),
-            discord.SelectOption(label="Mystery Boxes", emoji=resolve_emoji(E_GIVEAWAY), description="Try your luck! (SC)", value="Mystery Boxes"),
-            discord.SelectOption(label="Shiny Coins", emoji=resolve_emoji(E_SHINY), description="Exchange Cash for SC", value="Shiny Coins"),
+            discord.SelectOption(label="User Market", description="Player listings (PC)", emoji=discord.PartialEmoji.from_str(E_PC), value="user_market"),
+            discord.SelectOption(label="Admin: Pokemon", description="Official Pokemon (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_PIKACHU), value="pokemon"),
+            discord.SelectOption(label="Admin: Items", description="Items & Tools (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_ITEMBOX), value="item"),
+            discord.SelectOption(label="Admin: Mystery Boxes", description="Try your luck (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_GIVEAWAY), value="mystery"),
         ]
-        # Custom ID for persistence
-        super().__init__(placeholder="Select Shop Category...", min_values=1, max_values=1, options=options, custom_id="shop_dropdown")
-    
+        super().__init__(placeholder="Select Shop Category...", min_values=1, max_values=1, options=options)
+        self.ctx = ctx
+
     async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id: return
         cat = self.values[0]
         
-        # 1. Setup Query & Visuals based on Category
-        items = []
-        color = 0x3498db
-        currency = E_SHINY
-        
-        if cat == "User Market":
-            # Fetch from User Market Collection
-            if db is not None:
-                items = list(market_col.find({"status": "active"}))
-            currency = E_PC
-            color = 0xe67e22 # Orange
-        elif cat == "Mystery Boxes":
-            if db is not None:
-                items = list(shop_col.find({"category": "Mystery Boxes"}))
-            color = 0xFF69B4 # Pink
-        elif cat == "Pokemon":
-            if db is not None:
-                items = list(shop_col.find({"category": "Pokemon"}))
-            color = 0xe74c3c # Red
+        query = {"sold": False}
+        if cat == "user_market": 
+            query["category"] = "user_market"
+            emoji_curr = E_PC
+            color = 0x3498db
+        elif cat == "mystery":
+            query["category"] = "mystery"
+            emoji_curr = E_SHINY
+            color = 0x9b59b6
         else:
-            if db is not None:
-                items = list(shop_col.find({"category": cat}))
-            color = 0x2ecc71 # Green/Default
-
-        # 2. Handle Empty Shop
-        if not items: 
-            return await interaction.response.send_message(
-                embed=create_embed(f"{cat}", "🚫 This section is currently sold out.", 0x95a5a6), 
-                ephemeral=True
-            )
+            query["category"] = cat
+            query["seller_id"] = "ADMIN"
+            emoji_curr = E_SHINY
+            color = 0xe74c3c
+            
+        items = list(shop_items_col.find(query))
+        if not items: return await interaction.response.send_message(f"No items in **{cat.replace('_', ' ').title()}**.", ephemeral=True)
         
-        # 3. Build Data for Paginator
         data = []
         for i in items:
-            # Format Name
-            name_display = i['name']
+            stats = ""
+            if i.get("stats"): stats = f" | Lvl {i['stats']['level']} - {i['stats']['iv']}%"
+            data.append((f"{i['name']}{stats}", f"{E_ITEMBOX} ID: **{i['id']}**\n{E_MONEY} Price: **{i['price']:,}** {emoji_curr}"))
             
-            # Format Price & ID
-            details = f"**ID:** `{i['id']}`\n"
-            details += f"**Price:** {currency} {i['price']:,}\n"
-            
-            if cat == "User Market":
-                seller = f"<@{i['seller_id']}>"
-                details += f"**Seller:** {seller}\n"
-                # Add scraped stats if available in description/tags
-                if i.get("tags"): details += f"**Tags:** {', '.join(i['tags'])}\n"
-            else:
-                stock = i.get('stock', -1)
-                stock_str = "∞" if stock == -1 else f"{stock}"
-                details += f"**Stock:** {stock_str}"
-
-            data.append((name_display, details))
-
-        # 4. Launch Paginator (Safe Mode)
-        # We need a dummy object because Paginator usually expects 'ctx.author'
-        class DummyCtx:
-            def __init__(self, author): self.author = author
-            
-        dummy_ctx = DummyCtx(interaction.user)
-        
-        view = Paginator(dummy_ctx, data, f"{E_STARS} {cat}", color)
+        view = Paginator(self.ctx, data, f"Shop: {cat.replace('_', ' ').title()}", color)
         await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
 
 class ShopView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(ShopSelect())
-
-class GiveawayView(View):
-    def __init__(self, giveaway_id=None, required_role_id=None):
-        super().__init__(timeout=None) 
-        self.giveaway_id = giveaway_id
-        self.required_role_id = required_role_id
-
-    @discord.ui.button(label="React to Enter", emoji=E_GIVEAWAY, style=discord.ButtonStyle.success, custom_id="gw_join")
-    async def join_button(self, interaction: discord.Interaction, button: Button):
-        if db is None: return
-        gw = giveaways_col.find_one({"message_id": interaction.message.id})
-        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", "❌ Ended.", 0xff0000), ephemeral=True)
-
-        if gw.get("type") == "req":
-            role = interaction.guild.get_role(int(gw["required_role_id"]))
-            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"Missing {role.mention}", 0xff0000), ephemeral=True)
-        
-        entries = 1
-        if gw.get("type") == "donor":
-            user_roles = [r.id for r in interaction.user.roles]
-            for rid, mul in DONOR_ROLES.items():
-                if rid in user_roles: entries = max(entries, mul)
-            
-            # Check if they have at least one donor role if entries is still default
-            is_donor = any(rid in user_roles for rid in DONOR_ROLES)
-            if not is_donor: return await interaction.response.send_message(embed=create_embed("Req", "❌ Donor Only.", 0xff0000), ephemeral=True)
-
-        if giveaways_col.find_one({"message_id": interaction.message.id, "participants.user_id": interaction.user.id}):
-            return await interaction.response.send_message(embed=create_embed("Info", "⚠️ Joined.", 0x95a5a6), ephemeral=True)
-        
-        giveaways_col.update_one({"message_id": interaction.message.id}, {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}})
-        await interaction.response.send_message(embed=create_embed("Success", f"✅ Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
-
-    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
-    async def list_button(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator: return
-        gw = giveaways_col.find_one({"message_id": interaction.message.id})
-        parts = gw.get("participants", []) if gw else []
-        txt = "\n".join([f"<@{p['user_id']}> ({p['entries']}x)" for p in parts[:20]])
-        if len(parts) > 20: txt += f"\n...and {len(parts)-20} more."
-        await interaction.response.send_message(embed=create_embed("Participants", txt or "None", 0x3498db), ephemeral=True)
-
-class MarketConfirmView(View):
-    def __init__(self, ctx, club_id, price, buyer_id, is_group=False):
+    def __init__(self, ctx):
         super().__init__(timeout=60)
-        self.ctx, self.club_id, self.price, self.buyer_id, self.is_group = ctx, club_id, price, buyer_id, is_group
-        self.value = None
+        self.add_item(ShopSelect(ctx))
 
-    @discord.ui.button(label="Confirm Buy", style=discord.ButtonStyle.success, custom_id="market_confirm")
-    async def confirm(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.ctx.author.id: return
+@bot.hybrid_command(name="shop", description="Open Shop Menu.")
+async def shop(ctx):
+    await ctx.send(embed=create_embed(f"{E_ITEMBOX} Global Market", "Browse the Admin Shop or User Market below.", 0x2ecc71), view=ShopView(ctx))
+
+@bot.hybrid_command(name="marketsearch", description="Filter User Market.")
+async def marketsearch(ctx, search: str):
+    items = list(shop_items_col.find({"category": "user_market", "sold": False, "name": {"$regex": search, "$options": "i"}}))
+    if not items: return await ctx.send(embed=create_embed("Empty", "No items found.", 0x95a5a6))
+    data = []
+    for i in items:
+        stats = f" | Lvl {i['stats']['level']} - {i['stats']['iv']}%" if i.get("stats") else ""
+        data.append((f"{i['name']}{stats}", f"ID: **{i['id']}** | Price: **{i['price']:,}** {E_PC}"))
+    view = Paginator(ctx, data, f"Search: {search}", 0x3498db)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.hybrid_command(name="pinfo", description="Inspect Admin Pokemon.")
+async def pinfo(ctx, item_id: str):
+    item = shop_items_col.find_one({"id": item_id, "type": "pokemon", "seller_id": "ADMIN"})
+    if not item: return await ctx.send(embed=create_embed("Not Found", "Invalid ID or not an Admin Pokemon.", 0xff0000))
         
-        if self.is_group:
-            g = groups_col.find_one({"name": self.buyer_id.replace("group:", "")})
-            bal = g["funds"]
-        else:
-            w = get_wallet(self.buyer_id)
-            bal = w["balance"] if w else 0
-            
-        if bal < self.price: return await interaction.response.send_message(embed=create_embed("Error", "Insufficient funds.", 0xff0000), ephemeral=True)
+    stats = item.get("stats", {"level": 0, "iv": 0})
+    cat_raw = item.get("sub_category", "Unknown")
+    emoji_map = {"common": "🍀", "rare": "🌌", "shiny": "✨", "regional": "⛩️"}
+    
+    desc = (
+        f"**Name:** {item['name']}\n"
+        f"**Category:** {cat_raw.title()} {emoji_map.get(cat_raw, '')}\n"
+        f"**Level:** {stats['level']}\n"
+        f"**IV:** {stats['iv']}%\n"
+        f"**Price:** {item['price']:,} {E_SHINY}\n"
+        f"**Status:** {'Sold 🔴' if item['sold'] else 'Available 🟢'}"
+    )
+    await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
 
-        if self.is_group: groups_col.update_one({"name": self.buyer_id.replace("group:", "")}, {"$inc": {"funds": -self.price}})
-        else: wallets_col.update_one({"user_id": str(self.buyer_id)}, {"$inc": {"balance": -self.price}})
+@bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item or mystery box.")
+async def iteminfo(ctx, *, query: str):
+    # 1. Search Logic
+    item = shop_col.find_one({"id": query})
+    if not item:
+        item = shop_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
+        
+    if not item:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item or Box not found.", 0xff0000))
 
-        clubs_col.update_one({"id": self.club_id}, {"$set": {"owner_id": str(self.buyer_id), "last_bid_price": self.price}})
-        if not self.is_group:
-            profiles_col.update_one({"user_id": str(self.buyer_id)}, {"$set": {"owned_club_id": self.club_id}}, upsert=True)
+    # 2. Visuals
+    category = item.get('category', 'Item')
+    icon = E_ITEMBOX
+    color = 0x3498db
+    
+    if category == "Mystery Boxes": icon = E_GIVEAWAY; color = 0xFF69B4
+    elif category == "Shiny Coins": icon = E_SHINY; color = 0xf1c40f
+    elif category == "Pokemon": icon = E_PIKACHU
 
-        await interaction.response.send_message(embed=create_embed(f"{E_SUCCESS} Purchased!", f"Club ID {self.club_id} bought for ${self.price:,}", 0x2ecc71))
-        self.stop()
+    # 3. Build Embed
+    embed = discord.Embed(title=f"{icon} {item['name']}", description=f"**Category:** {category}", color=color)
+    embed.add_field(name=f"{E_SHINY} Price", value=f"{item['price']:,} SC", inline=True)
+    stock_display = "∞ (Unlimited)" if item['stock'] == -1 else f"{item['stock']:,}"
+    embed.add_field(name=f"{E_ITEMBOX} Stock", value=stock_display, inline=True)
+    embed.add_field(name=f"{E_ADMIN} Item ID", value=f"`{item['id']}`", inline=True)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, custom_id="market_cancel")
-    async def cancel(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.ctx.author.id: return
-        await interaction.response.send_message("Cancelled.", ephemeral=True)
-        self.stop()
+    # 4. Show Image (Crucial Step)
+    if item.get("image_url"):
+        embed.set_thumbnail(url=item["image_url"])
+    elif category == "Mystery Boxes":
+        # Fallback for boxes if no specific image uploaded
+        embed.set_thumbnail(url="https://i.imgur.com/YourDefaultBoxImage.jpg") 
+
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
+async def inventory(ctx):
+    w = wallets_col.find_one({"user_id": str(ctx.author.id)})
+    shiny = w.get("shiny_coins", 0) if w else 0
+    pc = w.get("pc", 0) if w else 0
+    items = list(inventory_col.find({"user_id": str(ctx.author.id)}))
+    
+    desc = f"{E_SHINY} **Shiny Coins:** {shiny:,}\n{E_PC} **Pokécoins:** {pc:,}\n\n**Your Items:**"
+    data = []
+    if not items: data.append(("Empty", "No items owned."))
+    else:
+        for i in items: data.append((f"{i['item_name']}", f"Bought for: {i['price']:,} {i.get('currency', 'pc')}"))
+        
+    view = Paginator(ctx, data, f"{E_ITEMBOX} Inventory: {ctx.author.name}", 0x9b59b6)
+    # Inject header into first page
+    first_embed = view.get_embed()
+    first_embed.description = desc
+    await ctx.send(embed=first_embed, view=view)
 
 # ===========================
 #   REWARDS & CODES SYSTEM
@@ -2670,6 +2645,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
