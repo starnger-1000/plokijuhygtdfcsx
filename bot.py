@@ -352,6 +352,51 @@ async def market_simulation_task():
 async def on_command_completion(ctx):
     log_user_activity(ctx.author.id, "Command", f"Used {E_CHAT} `.{ctx.command.name}`")
 
+# ==============================================================================
+#  GIVEAWAY RECOVERY SYSTEM (Fixes Restart Issue)
+# ==============================================================================
+
+async def restart_giveaway_timer(mid, ch, prize, time_left):
+    """Helper to restart a timer for a specific giveaway."""
+    await asyncio.sleep(time_left)
+    await end_giveaway(mid, ch, prize)
+
+async def check_active_giveaways():
+    """Checks DB for active giveaways on startup and resumes them."""
+    await bot.wait_until_ready()
+    
+    if db is None: return
+    
+    # Find all giveaways that haven't been marked as ended
+    active_gws = giveaways_col.find({"ended": False})
+    
+    count = 0
+    for gw in active_gws:
+        try:
+            channel = bot.get_channel(gw['channel_id'])
+            if not channel: continue # Channel deleted?
+            
+            # Calculate remaining time
+            now = datetime.now().timestamp()
+            end_time = gw['end_time']
+            remaining = end_time - now
+            
+            if remaining <= 0:
+                # Giveaway ended while bot was offline -> Finish it NOW
+                print(f"[Giveaway] Ending expired giveaway {gw['message_id']}")
+                await end_giveaway(gw['message_id'], channel, gw['prize'])
+            else:
+                # Giveaway still running -> Restart the timer
+                print(f"[Giveaway] Resuming giveaway {gw['message_id']} ({int(remaining)}s left)")
+                bot.loop.create_task(restart_giveaway_timer(gw['message_id'], channel, gw['prize'], remaining))
+            
+            count += 1
+        except Exception as e:
+            print(f"[Giveaway Error] Failed to resume {gw.get('message_id')}: {e}")
+            
+    if count > 0:
+        print(f"[System] Resumed/Ended {count} active giveaways.")
+
 @bot.event
 async def on_message(message):
     if message.author.bot: return
@@ -2550,28 +2595,23 @@ async def botinfo(ctx):
 # ---------- RUN ----------
 @bot.event
 async def on_ready():
-    global cached_prefix
     print(f"Logged in as {bot.user}")
-    
-    # 1. Load Prefix Once
-    try:
-        if db is not None:
-            res = config_col.find_one({"key": "prefix"})
-            if res:
-                cached_prefix = res["value"]
-                print(f"Loaded Prefix: {cached_prefix}")
-    except Exception as e:
-        print(f"Database Error: {e}")
-
-    # 2. Sync Commands & Start Tasks
     try:
         await bot.tree.sync()
+        
+        # 1. Register Views (So buttons work after restart)
         bot.add_view(GiveawayView()) 
         bot.add_view(ShopView())
         bot.add_view(BotInfoView())
+        
+        # 2. Start Market Simulation (If not running)
         if not hasattr(bot, 'market_task_started'):
             bot.loop.create_task(market_simulation_task())
             bot.market_task_started = True
+            
+        # 3. START GIVEAWAY RECOVERY (The Fix)
+        bot.loop.create_task(check_active_giveaways())
+        
     except Exception as e: print(e)
 
 @bot.event
@@ -2604,6 +2644,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
