@@ -2385,6 +2385,82 @@ async def inventory(ctx):
     first_embed.description = desc
     await ctx.send(embed=first_embed, view=view)
 
+class GiveawayView(View):
+    def __init__(self, giveaway_id=None, required_role_id=None):
+        super().__init__(timeout=None) 
+        self.giveaway_id = giveaway_id
+        self.required_role_id = required_role_id
+
+    @discord.ui.button(label="React to Enter", emoji=E_GIVEAWAY, style=discord.ButtonStyle.success, custom_id="gw_join")
+    async def join_button(self, interaction: discord.Interaction, button: Button):
+        if db is None: return
+        gw = giveaways_col.find_one({"message_id": interaction.message.id})
+        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", "❌ Ended.", 0xff0000), ephemeral=True)
+
+        if gw.get("type") == "req":
+            role = interaction.guild.get_role(int(gw["required_role_id"]))
+            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"Missing {role.mention}", 0xff0000), ephemeral=True)
+        
+        entries = 1
+        if gw.get("type") == "donor":
+            user_roles = [r.id for r in interaction.user.roles]
+            for rid, mul in DONOR_ROLES.items():
+                if rid in user_roles: entries = max(entries, mul)
+            
+            # Check if they have at least one donor role if entries is still default
+            is_donor = any(rid in user_roles for rid in DONOR_ROLES)
+            if not is_donor: return await interaction.response.send_message(embed=create_embed("Req", "❌ Donor Only.", 0xff0000), ephemeral=True)
+
+        if giveaways_col.find_one({"message_id": interaction.message.id, "participants.user_id": interaction.user.id}):
+            return await interaction.response.send_message(embed=create_embed("Info", "⚠️ Joined.", 0x95a5a6), ephemeral=True)
+        
+        giveaways_col.update_one({"message_id": interaction.message.id}, {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}})
+        await interaction.response.send_message(embed=create_embed("Success", f"✅ Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
+
+    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
+    async def list_button(self, interaction: discord.Interaction, button: Button):
+        if not interaction.user.guild_permissions.administrator: return
+        gw = giveaways_col.find_one({"message_id": interaction.message.id})
+        parts = gw.get("participants", []) if gw else []
+        txt = "\n".join([f"<@{p['user_id']}> ({p['entries']}x)" for p in parts[:20]])
+        if len(parts) > 20: txt += f"\n...and {len(parts)-20} more."
+        await interaction.response.send_message(embed=create_embed("Participants", txt or "None", 0x3498db), ephemeral=True)
+
+class MarketConfirmView(View):
+    def __init__(self, ctx, club_id, price, buyer_id, is_group=False):
+        super().__init__(timeout=60)
+        self.ctx, self.club_id, self.price, self.buyer_id, self.is_group = ctx, club_id, price, buyer_id, is_group
+        self.value = None
+
+    @discord.ui.button(label="Confirm Buy", style=discord.ButtonStyle.success, custom_id="market_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.ctx.author.id: return
+        
+        if self.is_group:
+            g = groups_col.find_one({"name": self.buyer_id.replace("group:", "")})
+            bal = g["funds"]
+        else:
+            w = get_wallet(self.buyer_id)
+            bal = w["balance"] if w else 0
+            
+        if bal < self.price: return await interaction.response.send_message(embed=create_embed("Error", "Insufficient funds.", 0xff0000), ephemeral=True)
+
+        if self.is_group: groups_col.update_one({"name": self.buyer_id.replace("group:", "")}, {"$inc": {"funds": -self.price}})
+        else: wallets_col.update_one({"user_id": str(self.buyer_id)}, {"$inc": {"balance": -self.price}})
+
+        clubs_col.update_one({"id": self.club_id}, {"$set": {"owner_id": str(self.buyer_id), "last_bid_price": self.price}})
+        if not self.is_group:
+            profiles_col.update_one({"user_id": str(self.buyer_id)}, {"$set": {"owned_club_id": self.club_id}}, upsert=True)
+
+        await interaction.response.send_message(embed=create_embed(f"{E_SUCCESS} Purchased!", f"Club ID {self.club_id} bought for ${self.price:,}", 0x2ecc71))
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, custom_id="market_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.ctx.author.id: return
+        await interaction.response.send_message("Cancelled.", ephemeral=True)
+        self.stop()
+
 # ===========================
 #   REWARDS & CODES SYSTEM
 # ===========================
@@ -2644,6 +2720,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
