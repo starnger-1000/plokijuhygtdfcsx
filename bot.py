@@ -1496,6 +1496,44 @@ async def checkclubmessages(ctx, club_name: str, count: int):
         await ctx.send(embed=create_embed(f"{E_BOOST} Activity Bonus", f"**{c['name']}** value increased by **${bonus:,}**.", 0x2ecc71))
     else: await ctx.send(embed=create_embed("Info", "Not enough messages.", 0x95a5a6))
 
+@bot.hybrid_command(name="removeshares", description="Admin: Force remove shares from a user.")
+@commands.has_permissions(administrator=True)
+async def removeshares(ctx, group_name: str, member: discord.Member, percentage: int):
+    gname = group_name.lower()
+    
+    # 1. Check if user is in the group
+    mem_record = group_members_col.find_one({"group_name": gname, "user_id": str(member.id)})
+    if not mem_record:
+        return await ctx.send(embed=create_embed("Error", f"{member.mention} is not in group **{group_name}**.", 0xff0000))
+    
+    current_share = mem_record.get("share_percentage", 0)
+    new_share = current_share - percentage
+    
+    action_taken = ""
+    
+    # 2. Logic: Reduce or Remove
+    if new_share <= 0:
+        # If shares drop to 0 or below, remove them from the group entirely
+        group_members_col.delete_one({"_id": mem_record["_id"]})
+        action_taken = f"{E_DANGER} **Removed from Group** (Shares reached 0%)"
+        new_share = 0
+    else:
+        # Otherwise, just reduce the percentage
+        group_members_col.update_one({"_id": mem_record["_id"]}, {"$set": {"share_percentage": new_share}})
+        action_taken = f"{E_GOLD_TICK} **Shares Reduced**"
+        
+    # 3. Log and Reply
+    desc = (
+        f"**Group:** {group_name}\n"
+        f"**User:** {member.mention}\n"
+        f"**Deducted:** {percentage}%\n"
+        f"**New Total:** {new_share}%\n\n"
+        f"**Status:** {action_taken}"
+    )
+    
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Shares Deleted", desc, 0xe74c3c))
+
+
 @bot.hybrid_command(name="adjustgroupfunds", aliases=["agf"], description="Admin: Cheat funds.")
 @commands.has_permissions(administrator=True)
 async def adjustgroupfunds(ctx, group_name: str, amount: HumanInt):
@@ -2496,6 +2534,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
