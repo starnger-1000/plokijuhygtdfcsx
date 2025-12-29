@@ -1979,46 +1979,51 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
 
 @bot.hybrid_command(name="addshopitem", aliases=["asi"], description="Admin: Add item to shop (Attach image).")
 @commands.has_permissions(administrator=True)
-async def addshopitem(ctx, name: str, category: str, price: HumanAmount, image: discord.Attachment = None):
-    # 1. Validate Category (Case-Insensitive)
+async def addshopitem(ctx, name: str, category: str, price_input: str, image: discord.Attachment = None):
+    # 1. Convert Price (Handle 50k, 1m, etc.) manually
+    try:
+        clean = price_input.lower().replace(",", "").replace("$", "")
+        multiplier = 1
+        if clean.endswith('k'): multiplier = 1000; clean = clean.replace("k", "")
+        elif clean.endswith('m'): multiplier = 1000000; clean = clean.replace("m", "")
+        elif clean.endswith('b'): multiplier = 1000000000; clean = clean.replace("b", "")
+        
+        price = int(float(clean) * multiplier)
+    except:
+        return await ctx.send(embed=create_embed("Error", f"Invalid price format: **{price_input}**.\nTry: `50000` or `50k`.", 0xff0000))
+
+    # 2. Validate Category (Case-Insensitive Fix)
     valid_cats = ["Items", "Shiny Coins", "Pokemon", "Mystery Boxes", "User Market"]
-    
-    # Auto-fix casing (e.g., "items" -> "Items")
+    # Find the matching category regardless of how user typed it (e.g. "items" -> "Items")
     matched_cat = next((c for c in valid_cats if c.lower() == category.lower()), None)
     
     if not matched_cat:
         cat_list = "\n".join([f"• {c}" for c in valid_cats])
-        return await ctx.send(embed=create_embed("Invalid Category", f"Please choose one of these categories:\n{cat_list}", 0xff0000))
+        return await ctx.send(embed=create_embed("Invalid Category", f"Please type one of these exact categories:\n{cat_list}", 0xff0000))
 
-    # 2. Get Image URL
+    # 3. Get Image URL
     img_url = image.url if image else ""
     if not img_url and ctx.message.attachments:
         img_url = ctx.message.attachments[0].url
 
-    # 3. Generate ID & Save
+    # 4. Generate ID
     sid = f"A{get_next_id('shop_id')}"
     
+    # 5. Save to Database
     shop_col.insert_one({
         "id": sid, 
         "name": name, 
-        "category": matched_cat, # Use the corrected category name
+        "category": matched_cat, # Uses the corrected Capitalized category
         "price": price, 
         "stock": -1,
         "image_url": img_url 
     })
     
-    # 4. Confirmation
-    embed = create_embed(f"{E_SUCCESS} Item Added", f"**{name}** added to {matched_cat}.\n**ID:** `{sid}`\n**Price:** {E_SHINY} {price:,}", 0x2ecc71)
+    # 6. Confirmation
+    embed = create_embed(f"{E_SUCCESS} Item Added", f"**{name}** added to **{matched_cat}**.\n**ID:** `{sid}`\n**Price:** {E_SHINY} {price:,}", 0x2ecc71)
     if img_url: embed.set_thumbnail(url=img_url)
     
     await ctx.send(embed=embed)
-
-@addshopitem.error
-async def addshopitem_error(ctx, error):
-    if isinstance(error, commands.BadArgument):
-        await ctx.send(embed=create_embed("Format Error", "Could not understand the price.\nTry: `50k`, `1.5m`, or `50000`.", 0xff0000))
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(embed=create_embed("Missing Info", "Usage:\n`.asi \"Item Name\" Category Price`\n\n*Example:*\n`.asi \"Nepotalian Pizza\" Items 50k`", 0xff0000))
 
 @bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon (Select Category).")
 @discord.app_commands.choices(category=[
@@ -2663,6 +2668,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
