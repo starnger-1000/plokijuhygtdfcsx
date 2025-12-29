@@ -2250,140 +2250,90 @@ async def buy(ctx, item_id: str, coupon_code: str = None):
         except: pass
     
     await ctx.send(embed=create_embed(f"{E_TIMER} Request Sent", f"Purchase request submitted for **{item['name']}**.\n**Cost:** {buyer_pays:,} {emoji_curr}\n{coupon_msg}\n{E_ADMIN} Waiting for Admin Approval.", 0xf1c40f))
-class ShopSelect(Select):
-    def __init__(self, ctx):
-        options = [
-            discord.SelectOption(label="User Market", description="Player listings (PC)", emoji=discord.PartialEmoji.from_str(E_PC), value="user_market"),
-            discord.SelectOption(label="Admin: Pokemon", description="Official Pokemon (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_PIKACHU), value="pokemon"),
-            discord.SelectOption(label="Admin: Items", description="Items & Tools (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_ITEMBOX), value="item"),
-            discord.SelectOption(label="Admin: Mystery Boxes", description="Try your luck (Shiny Coins)", emoji=discord.PartialEmoji.from_str(E_GIVEAWAY), value="mystery"),
-        ]
-        super().__init__(placeholder="Select Shop Category...", min_values=1, max_values=1, options=options)
-        self.ctx = ctx
 
+# --- ADVANCED SHOP DROPDOWN (Final Fixed Version) ---
+class ShopSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="User Market", emoji=resolve_emoji(E_AUCTION), description="Buy Pokemon from players (PC)", value="User Market"),
+            discord.SelectOption(label="Pokemon", emoji=resolve_emoji(E_PIKACHU), description="Rare/Legendary Pokemon (SC)", value="Pokemon"),
+            discord.SelectOption(label="Items", emoji=resolve_emoji(E_ITEMBOX), description="Balls, Potions, Tools (SC)", value="Items"),
+            discord.SelectOption(label="Mystery Boxes", emoji=resolve_emoji(E_GIVEAWAY), description="Try your luck! (SC)", value="Mystery Boxes"),
+            discord.SelectOption(label="Shiny Coins", emoji=resolve_emoji(E_SHINY), description="Exchange Cash for SC", value="Shiny Coins"),
+        ]
+        # Custom ID for persistence
+        super().__init__(placeholder="Select Shop Category...", min_values=1, max_values=1, options=options, custom_id="shop_dropdown")
+    
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.ctx.author.id: return
         cat = self.values[0]
         
-        query = {"sold": False}
-        if cat == "user_market": 
-            query["category"] = "user_market"
-            emoji_curr = E_PC
-            color = 0x3498db
-        elif cat == "mystery":
-            query["category"] = "mystery"
-            emoji_curr = E_SHINY
-            color = 0x9b59b6
-        else:
-            query["category"] = cat
-            query["seller_id"] = "ADMIN"
-            emoji_curr = E_SHINY
-            color = 0xe74c3c
-            
-        items = list(shop_items_col.find(query))
-        if not items: return await interaction.response.send_message(f"No items in **{cat.replace('_', ' ').title()}**.", ephemeral=True)
+        # 1. Setup Query & Visuals based on Category
+        items = []
+        color = 0x3498db
+        currency = E_SHINY
         
+        if cat == "User Market":
+            # Fetch from User Market Collection
+            if db is not None:
+                items = list(market_col.find({"status": "active"}))
+            currency = E_PC
+            color = 0xe67e22 # Orange
+        elif cat == "Mystery Boxes":
+            if db is not None:
+                items = list(shop_col.find({"category": "Mystery Boxes"}))
+            color = 0xFF69B4 # Pink
+        elif cat == "Pokemon":
+            if db is not None:
+                items = list(shop_col.find({"category": "Pokemon"}))
+            color = 0xe74c3c # Red
+        else:
+            if db is not None:
+                items = list(shop_col.find({"category": cat}))
+            color = 0x2ecc71 # Green/Default
+
+        # 2. Handle Empty Shop
+        if not items: 
+            return await interaction.response.send_message(
+                embed=create_embed(f"{cat}", "🚫 This section is currently sold out.", 0x95a5a6), 
+                ephemeral=True
+            )
+        
+        # 3. Build Data for Paginator
         data = []
         for i in items:
-            stats = ""
-            if i.get("stats"): stats = f" | Lvl {i['stats']['level']} - {i['stats']['iv']}%"
-            data.append((f"{i['name']}{stats}", f"{E_ITEMBOX} ID: **{i['id']}**\n{E_MONEY} Price: **{i['price']:,}** {emoji_curr}"))
+            # Format Name
+            name_display = i['name']
             
-        view = Paginator(self.ctx, data, f"Shop: {cat.replace('_', ' ').title()}", color)
+            # Format Price & ID
+            details = f"**ID:** `{i['id']}`\n"
+            details += f"**Price:** {currency} {i['price']:,}\n"
+            
+            if cat == "User Market":
+                seller = f"<@{i['seller_id']}>"
+                details += f"**Seller:** {seller}\n"
+                # Add scraped stats if available in description/tags
+                if i.get("tags"): details += f"**Tags:** {', '.join(i['tags'])}\n"
+            else:
+                stock = i.get('stock', -1)
+                stock_str = "∞" if stock == -1 else f"{stock}"
+                details += f"**Stock:** {stock_str}"
+
+            data.append((name_display, details))
+
+        # 4. Launch Paginator (Safe Mode)
+        # We need a dummy object because Paginator usually expects 'ctx.author'
+        class DummyCtx:
+            def __init__(self, author): self.author = author
+            
+        dummy_ctx = DummyCtx(interaction.user)
+        
+        view = Paginator(dummy_ctx, data, f"{E_STARS} {cat}", color)
         await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
 
 class ShopView(View):
-    def __init__(self, ctx):
-        super().__init__(timeout=60)
-        self.add_item(ShopSelect(ctx))
-
-@bot.hybrid_command(name="shop", description="Open Shop Menu.")
-async def shop(ctx):
-    await ctx.send(embed=create_embed(f"{E_ITEMBOX} Global Market", "Browse the Admin Shop or User Market below.", 0x2ecc71), view=ShopView(ctx))
-
-@bot.hybrid_command(name="marketsearch", description="Filter User Market.")
-async def marketsearch(ctx, search: str):
-    items = list(shop_items_col.find({"category": "user_market", "sold": False, "name": {"$regex": search, "$options": "i"}}))
-    if not items: return await ctx.send(embed=create_embed("Empty", "No items found.", 0x95a5a6))
-    data = []
-    for i in items:
-        stats = f" | Lvl {i['stats']['level']} - {i['stats']['iv']}%" if i.get("stats") else ""
-        data.append((f"{i['name']}{stats}", f"ID: **{i['id']}** | Price: **{i['price']:,}** {E_PC}"))
-    view = Paginator(ctx, data, f"Search: {search}", 0x3498db)
-    await ctx.send(embed=view.get_embed(), view=view)
-
-@bot.hybrid_command(name="pinfo", description="Inspect Admin Pokemon.")
-async def pinfo(ctx, item_id: str):
-    item = shop_items_col.find_one({"id": item_id, "type": "pokemon", "seller_id": "ADMIN"})
-    if not item: return await ctx.send(embed=create_embed("Not Found", "Invalid ID or not an Admin Pokemon.", 0xff0000))
-        
-    stats = item.get("stats", {"level": 0, "iv": 0})
-    cat_raw = item.get("sub_category", "Unknown")
-    emoji_map = {"common": "🍀", "rare": "🌌", "shiny": "✨", "regional": "⛩️"}
-    
-    desc = (
-        f"**Name:** {item['name']}\n"
-        f"**Category:** {cat_raw.title()} {emoji_map.get(cat_raw, '')}\n"
-        f"**Level:** {stats['level']}\n"
-        f"**IV:** {stats['iv']}%\n"
-        f"**Price:** {item['price']:,} {E_SHINY}\n"
-        f"**Status:** {'Sold 🔴' if item['sold'] else 'Available 🟢'}"
-    )
-    await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
-
-@bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item or mystery box.")
-async def iteminfo(ctx, *, query: str):
-    # 1. Search Logic
-    item = shop_col.find_one({"id": query})
-    if not item:
-        item = shop_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
-        
-    if not item:
-        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item or Box not found.", 0xff0000))
-
-    # 2. Visuals
-    category = item.get('category', 'Item')
-    icon = E_ITEMBOX
-    color = 0x3498db
-    
-    if category == "Mystery Boxes": icon = E_GIVEAWAY; color = 0xFF69B4
-    elif category == "Shiny Coins": icon = E_SHINY; color = 0xf1c40f
-    elif category == "Pokemon": icon = E_PIKACHU
-
-    # 3. Build Embed
-    embed = discord.Embed(title=f"{icon} {item['name']}", description=f"**Category:** {category}", color=color)
-    embed.add_field(name=f"{E_SHINY} Price", value=f"{item['price']:,} SC", inline=True)
-    stock_display = "∞ (Unlimited)" if item['stock'] == -1 else f"{item['stock']:,}"
-    embed.add_field(name=f"{E_ITEMBOX} Stock", value=stock_display, inline=True)
-    embed.add_field(name=f"{E_ADMIN} Item ID", value=f"`{item['id']}`", inline=True)
-
-    # 4. Show Image (Crucial Step)
-    if item.get("image_url"):
-        embed.set_thumbnail(url=item["image_url"])
-    elif category == "Mystery Boxes":
-        # Fallback for boxes if no specific image uploaded
-        embed.set_thumbnail(url="https://i.imgur.com/YourDefaultBoxImage.jpg") 
-
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
-async def inventory(ctx):
-    w = wallets_col.find_one({"user_id": str(ctx.author.id)})
-    shiny = w.get("shiny_coins", 0) if w else 0
-    pc = w.get("pc", 0) if w else 0
-    items = list(inventory_col.find({"user_id": str(ctx.author.id)}))
-    
-    desc = f"{E_SHINY} **Shiny Coins:** {shiny:,}\n{E_PC} **Pokécoins:** {pc:,}\n\n**Your Items:**"
-    data = []
-    if not items: data.append(("Empty", "No items owned."))
-    else:
-        for i in items: data.append((f"{i['item_name']}", f"Bought for: {i['price']:,} {i.get('currency', 'pc')}"))
-        
-    view = Paginator(ctx, data, f"{E_ITEMBOX} Inventory: {ctx.author.name}", 0x9b59b6)
-    # Inject header into first page
-    first_embed = view.get_embed()
-    first_embed.description = desc
-    await ctx.send(embed=first_embed, view=view)
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ShopSelect())
 
 class GiveawayView(View):
     def __init__(self, giveaway_id=None, required_role_id=None):
@@ -2720,6 +2670,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
