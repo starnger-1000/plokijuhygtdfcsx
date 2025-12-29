@@ -316,14 +316,37 @@ def parse_prize_amount(prize_str):
 
 # ---------- TASKS & EVENTS ----------
 async def market_simulation_task():
-    while True:
-        await asyncio.sleep(3600)
-        if db is not None:
-            for c in clubs_col.find():
-                base = c.get("value", c["base_price"])
-                change = random.uniform(-0.03, 0.03)
-                new_value = int(max(100, base * (1 + change)))
-                clubs_col.update_one({"_id": c["_id"]}, {"$set": {"value": new_value}})
+    await bot.wait_until_ready()
+    print("[Market] Simulation task started.")
+    while not bot.is_closed():
+        try:
+            # Wait 1 hour (3600 seconds)
+            await asyncio.sleep(3600)
+            
+            if db is not None:
+                updated_count = 0
+                for c in clubs_col.find():
+                    # Get current value, fallback to base_price if missing
+                    current_val = c.get("value", c.get("base_price", 0))
+                    
+                    # Fluctuate between -3% and +3%
+                    percent_change = random.uniform(-0.03, 0.03)
+                    change_amount = int(current_val * percent_change)
+                    new_value = max(100, current_val + change_amount) # Minimum value 100
+                    
+                    clubs_col.update_one({"_id": c["_id"]}, {"$set": {"value": new_value}})
+                    updated_count += 1
+                
+                print(f"[Market] Auto-Updated values for {updated_count} clubs.")
+                
+                # Optional: Log to Discord Channel
+                log_ch = bot.get_channel(LOG_CHANNELS["club"])
+                if log_ch: 
+                    await log_ch.send(embed=create_embed(f"{E_STARS} Market Update", f"Values for **{updated_count}** clubs have shifted due to market volatility.", 0x3498db))
+                    
+        except Exception as e:
+            print(f"[Market Error] {e}")
+            await asyncio.sleep(60) # Wait 1 min before retrying if error
 
 @bot.event
 async def on_command_completion(ctx):
@@ -1909,17 +1932,30 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
 #   GROUP 6: NEW SHOP & INVENTORY
 # ===========================
 
-@bot.hybrid_command(name="addshopitem", description="Admin: Add Item to Shop.")
+@bot.hybrid_command(name="addshopitem", aliases=["asi"], description="Admin: Add item to shop (Attach image).")
 @commands.has_permissions(administrator=True)
-async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = None):
-    item_id = f"A{get_next_id('shop_item_id')}" 
-    img_url = image.url if image else None
-    shop_items_col.insert_one({
-        "id": item_id, "type": "item", "name": name, "price": price, 
-        "currency": "shiny", "seller_id": "ADMIN", "image_url": img_url, 
-        "sold": False, "tax_exempt": True, "category": "item"
+async def addshopitem(ctx, name: str, category: str, price: int, image: discord.Attachment = None):
+    # 1. Get Image URL if attached
+    img_url = image.url if image else ""
+    
+    # 2. Generate ID
+    sid = f"A{get_next_id('shop_id')}"
+    
+    # 3. Save to Database with Image
+    shop_col.insert_one({
+        "id": sid, 
+        "name": name, 
+        "category": category, 
+        "price": price, 
+        "stock": -1, 
+        "image_url": img_url # <--- Saving the image here
     })
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** added to Admin Shop.\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
+    
+    # 4. Confirmation Embed
+    embed = create_embed(f"{E_SUCCESS} Item Added", f"**{name}** added to {category} shop.\nID: `{sid}`\nPrice: {E_SHINY} {price:,}", 0x2ecc71)
+    if img_url: embed.set_thumbnail(url=img_url)
+    
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon (Select Category).")
 @discord.app_commands.choices(category=[
@@ -2250,6 +2286,40 @@ async def pinfo(ctx, item_id: str):
     )
     await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
 
+@bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item or mystery box.")
+async def iteminfo(ctx, *, query: str):
+    # 1. Search Logic
+    item = shop_col.find_one({"id": query})
+    if not item:
+        item = shop_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
+        
+    if not item:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item or Box not found.", 0xff0000))
+
+    # 2. Visuals
+    category = item.get('category', 'Item')
+    icon = E_ITEMBOX
+    color = 0x3498db
+    
+    if category == "Mystery Boxes": icon = E_GIVEAWAY; color = 0xFF69B4
+    elif category == "Shiny Coins": icon = E_SHINY; color = 0xf1c40f
+    elif category == "Pokemon": icon = E_PIKACHU
+
+    # 3. Build Embed
+    embed = discord.Embed(title=f"{icon} {item['name']}", description=f"**Category:** {category}", color=color)
+    embed.add_field(name=f"{E_SHINY} Price", value=f"{item['price']:,} SC", inline=True)
+    stock_display = "∞ (Unlimited)" if item['stock'] == -1 else f"{item['stock']:,}"
+    embed.add_field(name=f"{E_ITEMBOX} Stock", value=stock_display, inline=True)
+    embed.add_field(name=f"{E_ADMIN} Item ID", value=f"`{item['id']}`", inline=True)
+
+    # 4. Show Image (Crucial Step)
+    if item.get("image_url"):
+        embed.set_thumbnail(url=item["image_url"])
+    elif category == "Mystery Boxes":
+        # Fallback for boxes if no specific image uploaded
+        embed.set_thumbnail(url="https://i.imgur.com/YourDefaultBoxImage.jpg") 
+
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
 async def inventory(ctx):
@@ -2534,6 +2604,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
