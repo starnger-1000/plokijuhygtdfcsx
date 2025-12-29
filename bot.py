@@ -1977,53 +1977,17 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
 #   GROUP 6: NEW SHOP & INVENTORY
 # ===========================
 
-@bot.hybrid_command(name="addshopitem", aliases=["asi"], description="Admin: Add item to shop (Attach image).")
+@bot.hybrid_command(name="addshopitem", description="Admin: Add Item to Shop.")
 @commands.has_permissions(administrator=True)
-async def addshopitem(ctx, name: str, category: str, price_input: str, image: discord.Attachment = None):
-    # 1. Convert Price (Handle 50k, 1m, etc.) manually
-    try:
-        clean = price_input.lower().replace(",", "").replace("$", "")
-        multiplier = 1
-        if clean.endswith('k'): multiplier = 1000; clean = clean.replace("k", "")
-        elif clean.endswith('m'): multiplier = 1000000; clean = clean.replace("m", "")
-        elif clean.endswith('b'): multiplier = 1000000000; clean = clean.replace("b", "")
-        
-        price = int(float(clean) * multiplier)
-    except:
-        return await ctx.send(embed=create_embed("Error", f"Invalid price format: **{price_input}**.\nTry: `50000` or `50k`.", 0xff0000))
-
-    # 2. Validate Category (Case-Insensitive Fix)
-    valid_cats = ["Items", "Shiny Coins", "Pokemon", "Mystery Boxes", "User Market"]
-    # Find the matching category regardless of how user typed it (e.g. "items" -> "Items")
-    matched_cat = next((c for c in valid_cats if c.lower() == category.lower()), None)
-    
-    if not matched_cat:
-        cat_list = "\n".join([f"• {c}" for c in valid_cats])
-        return await ctx.send(embed=create_embed("Invalid Category", f"Please type one of these exact categories:\n{cat_list}", 0xff0000))
-
-    # 3. Get Image URL
-    img_url = image.url if image else ""
-    if not img_url and ctx.message.attachments:
-        img_url = ctx.message.attachments[0].url
-
-    # 4. Generate ID
-    sid = f"A{get_next_id('shop_id')}"
-    
-    # 5. Save to Database
-    shop_col.insert_one({
-        "id": sid, 
-        "name": name, 
-        "category": matched_cat, # Uses the corrected Capitalized category
-        "price": price, 
-        "stock": -1,
-        "image_url": img_url 
+async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = None):
+    item_id = get_next_id("shop_item_id")
+    img_url = image.url if image else None
+    shop_items_col.insert_one({
+        "id": item_id, "type": "item", "name": name, "price": price, 
+        "currency": "shiny", "seller_id": "ADMIN", "image_url": img_url, 
+        "sold": False, "tax_exempt": True, "category": "item"
     })
-    
-    # 6. Confirmation
-    embed = create_embed(f"{E_SUCCESS} Item Added", f"**{name}** added to **{matched_cat}**.\n**ID:** `{sid}`\n**Price:** {E_SHINY} {price:,}", 0x2ecc71)
-    if img_url: embed.set_thumbnail(url=img_url)
-    
-    await ctx.send(embed=embed)
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Added", f"**{name}** added to Admin Shop.\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
 
 @bot.hybrid_command(name="addpokemon", description="Admin: Add Pokemon (Select Category).")
 @discord.app_commands.choices(category=[
@@ -2355,39 +2319,42 @@ async def pinfo(ctx, item_id: str):
     )
     await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
 
-@bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item or mystery box.")
+@bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item.")
 async def iteminfo(ctx, *, query: str):
     # 1. Search Logic
-    item = shop_col.find_one({"id": query})
+    item = None
+    
+    # Try ID first (Your addshopitem uses Integer IDs)
+    if query.isdigit():
+        item = shop_items_col.find_one({"id": int(query)})
+    
+    # If not found by ID, try Name search (Case-insensitive)
     if not item:
-        item = shop_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
+        item = shop_items_col.find_one({"name": {"$regex": f"^{re.escape(query)}$", "$options": "i"}})
         
     if not item:
-        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item or Box not found.", 0xff0000))
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item not found.", 0xff0000))
 
-    # 2. Visuals
-    category = item.get('category', 'Item')
-    icon = E_ITEMBOX
-    color = 0x3498db
+    # 2. Extract Data
+    name = item.get('name')
+    price = item.get('price')
+    image_url = item.get('image_url')
+    cat = item.get('category', 'item').title()
     
-    if category == "Mystery Boxes": icon = E_GIVEAWAY; color = 0xFF69B4
-    elif category == "Shiny Coins": icon = E_SHINY; color = 0xf1c40f
-    elif category == "Pokemon": icon = E_PIKACHU
-
-    # 3. Build Embed
-    embed = discord.Embed(title=f"{icon} {item['name']}", description=f"**Category:** {category}", color=color)
-    embed.add_field(name=f"{E_SHINY} Price", value=f"{item['price']:,} SC", inline=True)
-    stock_display = "∞ (Unlimited)" if item['stock'] == -1 else f"{item['stock']:,}"
-    embed.add_field(name=f"{E_ITEMBOX} Stock", value=stock_display, inline=True)
+    # Determine Visuals
+    currency = E_SHINY if item.get('currency') == 'shiny' else E_PC
+    color = 0x3498db # Blue
+    
+    # 3. Build Premium Embed
+    embed = discord.Embed(title=f"{E_ITEMBOX} {name}", description=f"**Category:** {cat}", color=color)
+    
+    embed.add_field(name=f"{currency} Price", value=f"{price:,}", inline=True)
     embed.add_field(name=f"{E_ADMIN} Item ID", value=f"`{item['id']}`", inline=True)
-
-    # 4. Show Image (Crucial Step)
-    if item.get("image_url"):
-        embed.set_thumbnail(url=item["image_url"])
-    elif category == "Mystery Boxes":
-        # Fallback for boxes if no specific image uploaded
-        embed.set_thumbnail(url="https://i.imgur.com/YourDefaultBoxImage.jpg") 
-
+    
+    # 4. Load Image (Like pinfo)
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+    
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
@@ -2668,6 +2635,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
