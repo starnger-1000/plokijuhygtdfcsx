@@ -1980,7 +1980,7 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
 @bot.hybrid_command(name="addshopitem", description="Admin: Add Item to Shop.")
 @commands.has_permissions(administrator=True)
 async def addshopitem(ctx, name: str, price: int, image: discord.Attachment = None):
-    item_id = get_next_id("shop_item_id")
+    item_id = f"A{get_next_id("shop_item_id")}"
     img_url = image.url if image else None
     shop_items_col.insert_one({
         "id": item_id, "type": "item", "name": name, "price": price, 
@@ -2036,6 +2036,35 @@ async def addmysterybox(ctx, name: str, price: int, pool: discord.app_commands.C
 async def addshinycoins(ctx, member: discord.Member, amount: int):
     wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"shiny_coins": amount}}, upsert=True)
     await ctx.send(embed=create_embed(f"{E_ADMIN} Grant", f"Added **{amount:,}** {E_SHINY} to {member.mention}.", 0xe67e22))
+
+@bot.hybrid_command(name="removeshopitem", aliases=["rsi", "delitem"], description="Admin: Remove an item from the shop by ID.")
+@commands.has_permissions(administrator=True)
+async def removeshopitem(ctx, item_id: str):
+    # 1. Smart Search Logic
+    # First, try to find it exactly as typed (e.g., "A157")
+    query = {"id": item_id}
+    item = shop_col.find_one(query)
+    
+    # If not found, and it looks like a number, try finding it as an Integer (e.g., 157)
+    if not item and item_id.isdigit():
+        query = {"id": int(item_id)}
+        item = shop_col.find_one(query)
+    
+    # 2. Validation
+    if not item:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item with ID `{item_id}` not found in the shop.", 0xff0000))
+    
+    # 3. Execution
+    shop_col.delete_one({"_id": item["_id"]})
+    
+    # 4. Confirmation Log
+    embed = create_embed(f"{E_DANGER} Item Deleted", f"**{item['name']}** (ID: `{item.get('id')}`) has been permanently removed.", 0xff0000)
+    
+    # Show the image of what was deleted if it existed
+    if item.get('image_url'):
+        embed.set_thumbnail(url=item['image_url'])
+        
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="addpc", description="Admin: Grant PC.")
 @commands.has_permissions(administrator=True)
@@ -2635,6 +2664,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
