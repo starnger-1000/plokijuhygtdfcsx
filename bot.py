@@ -2913,9 +2913,11 @@ async def on_ready():
             bot.loop.create_task(market_simulation_task())
             bot.market_task_started = True
 
+        # 3. Start Login Reminders (If not running)
         if not hasattr(bot, 'reminders_started'):
-        bot.loop.create_task(check_login_reminders())
-        bot.reminders_started = True
+            # These two lines MUST be indented 4 spaces relative to the 'if' above
+            bot.loop.create_task(check_login_reminders())
+            bot.reminders_started = True
             
         # 3. START GIVEAWAY RECOVERY (The Fix)
         bot.loop.create_task(check_active_giveaways())
@@ -2952,6 +2954,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
