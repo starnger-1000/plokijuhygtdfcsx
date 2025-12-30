@@ -129,6 +129,7 @@ if db is not None:
     activities_col = db.user_activities
     pending_deals_col = db.pending_deals # For Club Buying
     shop_items_col = db.shop_items
+    box_limits_col = db.box_limits # NEW: Stores user purchase limits
     inventory_col = db.inventory
     coupons_col = db.coupons
     redeem_codes_col = db.redeem_codes
@@ -536,6 +537,85 @@ async def daily(ctx):
         upsert=True
     )
     await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Daily Claimed", f"You received:\n+$10,000 {E_MONEY}\n+5 {E_SHINY}", 0x2ecc71))
+
+# ==============================================================================
+#  LOGIN & STREAK SYSTEM
+# ==============================================================================
+
+@bot.hybrid_command(name="login", description="Claim daily login rewards & build streaks (24h Cooldown).")
+async def login(ctx):
+    uid = str(ctx.author.id)
+    now = datetime.now()
+    
+    # 1. Fetch User Data
+    user_data = wallets_col.find_one({"user_id": uid})
+    
+    # Initialize if new user
+    if not user_data:
+        user_data = {"user_id": uid, "balance": 0, "shiny_coins": 0, "login_streak": 0, "last_login": None}
+        wallets_col.insert_one(user_data)
+        
+    last_login = user_data.get("last_login")
+    current_streak = user_data.get("login_streak", 0)
+    
+    # 2. Check Cooldown (24 Hours)
+    if last_login:
+        # Ensure last_login is a datetime object (handle legacy/fresh db)
+        if not isinstance(last_login, datetime):
+            # If it's stored differently or None, assume ready (or reset)
+            pass 
+        else:
+            diff = now - last_login
+            if diff < timedelta(hours=24):
+                # Calculate future timestamp for Discord relative time tag
+                next_claim = int((last_login + timedelta(hours=24)).timestamp())
+                return await ctx.send(embed=create_embed(f"{E_ALERT} Cooldown", f"You have already logged in today.\nNext reward available <t:{next_claim}:R>!", 0xff0000))
+            
+            # Check Streak Validity (48 hours grace period allowed)
+            if diff > timedelta(hours=48):
+                current_streak = 0 # Streak broken if > 48h since last login
+    
+    # 3. Calculate Rewards
+    current_streak += 1 # Increment for today
+    
+    base_cash = 100000
+    base_sc = 50
+    # Streak Bonus: Day 1=0, Day 2=10k, Day 3=20k...
+    streak_bonus = (current_streak - 1) * 10000
+    
+    total_cash = base_cash + streak_bonus
+    
+    # 4. Update Database
+    wallets_col.update_one(
+        {"user_id": uid},
+        {
+            "$inc": {"balance": total_cash, "shiny_coins": base_sc},
+            "$set": {"last_login": now, "login_streak": current_streak}
+        },
+        upsert=True
+    )
+    
+    # 5. Build Premium Embed
+    desc = (
+        f"Welcome back, **{ctx.author.name}**! Here are your rewards:\n\n"
+        f"{E_MONEY} **Base Cash:** ${base_cash:,}\n"
+        f"{E_BOOST} **Streak Bonus:** ${streak_bonus:,}\n"
+        f"{E_SHINY} **Shiny Coins:** {base_sc:,}\n"
+        f"──────────────────\n"
+        f"{E_SUCCESS} **Total Received:** ${total_cash:,} + {base_sc} SC"
+    )
+    
+    embed = create_embed(f"{E_FIRE} Daily Login (Day {current_streak})", desc, 0x2ecc71)
+    if ctx.author.avatar:
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+    
+    # Milestone Flair
+    if current_streak % 7 == 0:
+        embed.set_footer(text=f"🔥 {current_streak} Day Streak! Amazing dedication!")
+    else:
+        embed.set_footer(text="Login again in 24h to keep the streak!")
+    
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="grouplist", aliases=["gl"], description="List all investor groups.")
 async def grouplist(ctx):
@@ -2031,6 +2111,80 @@ async def addmysterybox(ctx, name: str, price: int, pool: discord.app_commands.C
     })
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Box Added", f"**{name}** added.\nPool: **{pool.name}**\nPrice: {price:,} {E_SHINY}", 0x2ecc71))
 
+# ==============================================================================
+#  MYSTERY BOX LIMIT SYSTEM
+# ==============================================================================
+
+@bot.hybrid_command(name="setboxlimit", description="Admin: Limit Mystery Box purchases for a user.")
+@commands.has_permissions(administrator=True)
+async def setboxlimit(ctx, member: discord.Member, category: str, limit: int, duration: str):
+    # 1. Parse Duration (e.g., "24h", "7d")
+    seconds = 0
+    duration = duration.lower()
+    if duration.endswith("d"): seconds = int(duration[:-1]) * 86400
+    elif duration.endswith("h"): seconds = int(duration[:-1]) * 3600
+    elif duration.endswith("m"): seconds = int(duration[:-1]) * 60
+    else: return await ctx.send(embed=create_embed("Error", "Invalid duration. Use `24h`, `7d`, etc.", 0xff0000))
+    
+    expires_at = datetime.now().timestamp() + seconds
+    
+    # 2. Normalize Category Name for matching
+    valid_cats = ["Shiny", "Rare", "Regional", "Common"]
+    target_cat = next((c for c in valid_cats if c.lower() in category.lower()), None)
+    
+    if not target_cat:
+        return await ctx.send(embed=create_embed("Error", f"Invalid category. Choose: {', '.join(valid_cats)}", 0xff0000))
+    
+    box_name_match = f"{target_cat} Mystery Box"
+
+    # 3. Save to DB
+    box_limits_col.update_one(
+        {"user_id": str(member.id), "box_name": box_name_match},
+        {
+            "$set": {
+                "limit": limit,
+                "bought": 0, # Reset bought count
+                "expires_at": expires_at
+            }
+        },
+        upsert=True
+    )
+    
+    desc = (
+        f"**User:** {member.mention}\n"
+        f"**Box:** {box_name_match}\n"
+        f"**Limit:** {limit} purchases\n"
+        f"**Expires:** <t:{int(expires_at)}:R>"
+    )
+    
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Limit Set", desc, 0x2ecc71))
+
+@bot.hybrid_command(name="limitinfo", aliases=["limits"], description="Check your Mystery Box buying limits.")
+async def limitinfo(ctx):
+    # 1. Fetch Limits
+    limits = list(box_limits_col.find({"user_id": str(ctx.author.id)}))
+    
+    active_limits = []
+    now = datetime.now().timestamp()
+    
+    for l in limits:
+        # Check if expired
+        if now > l['expires_at']:
+            box_limits_col.delete_one({"_id": l['_id']}) # Clean up DB
+            continue
+            
+        remaining = l['limit'] - l.get('bought', 0)
+        active_limits.append(
+            f"**{l['box_name']}**\n"
+            f"{E_ITEMBOX} Remaining: **{remaining}/{l['limit']}**\n"
+            f"{E_TIMER} Resets: <t:{int(l['expires_at'])}:R>"
+        )
+    
+    if not active_limits:
+        return await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Limits", "You have no active purchase limits.", 0x3498db))
+    
+    await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Your Purchase Limits", "\n\n".join(active_limits), 0xFF69B4))
+
 @bot.hybrid_command(name="addshinycoins", description="Admin: Grant Shiny Coins.")
 @commands.has_permissions(administrator=True)
 async def addshinycoins(ctx, member: discord.Member, amount: int):
@@ -2186,6 +2340,33 @@ class ShopApprovalView(discord.ui.View):
 async def buy(ctx, item_id: str, coupon_code: str = None):
     item = shop_items_col.find_one({"id": item_id, "sold": False})
     if not item: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Item not found or already sold.", 0xff0000))
+
+# ====================================================
+    # 👇 MYSTERY BOX LIMIT ENFORCER (Added Here) 👇
+    # ====================================================
+    # This checks if the item is a Mystery Box and if the user has a limit set
+    if item.get("category") == "Mystery Boxes" or item.get("category") == "mystery":
+        limit_data = box_limits_col.find_one({
+            "user_id": str(ctx.author.id), 
+            "box_name": item['name']
+        })
+        
+        if limit_data:
+            # Check if limit time has expired
+            if datetime.now().timestamp() > limit_data['expires_at']:
+                box_limits_col.delete_one({"_id": limit_data["_id"]}) # Remove expired limit
+            else:
+                # Check if user reached their cap
+                current_bought = limit_data.get('bought', 0)
+                if (current_bought + 1) > limit_data['limit']:
+                    remaining = max(0, limit_data['limit'] - current_bought)
+                    return await ctx.send(embed=create_embed(f"{E_DANGER} Limit Reached", f"You have reached your purchase limit for **{item['name']}**.\nYou can buy **{remaining}** more.\nLimit resets <t:{int(limit_data['expires_at'])}:R>.", 0xff0000))
+                
+                # Increment Count (We update the DB now to reserve the spot)
+                box_limits_col.update_one({"_id": limit_data["_id"]}, {"$inc": {"bought": 1}})
+    # ====================================================
+    # 👆 END OF LIMIT CHECK 👆
+    # ====================================================
     
     # Base Costs
     price = item['price']
@@ -2678,6 +2859,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
