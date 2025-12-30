@@ -33,7 +33,7 @@ LOG_CHANNELS = {
     "duelist": 1443955967086690395,
     "shop_log": 1446017729340379246, # Pokemon Confirmation Deal Embed Message
     "shop_main": 1446018190093058222, # Shop interface
-    "LOGIN_LOG_CHANNEL_ID" = 1455496870003740736, # Channel for Login Reminders
+    LOGIN_LOG_CHANNEL_ID = 1455496870003740736 # Channel for Login Reminders
     "chat_channel": 975275349573271552 # Daily Task Channel
 }
 
@@ -2952,6 +2952,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
