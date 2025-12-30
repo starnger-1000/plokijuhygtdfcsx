@@ -33,6 +33,7 @@ LOG_CHANNELS = {
     "duelist": 1443955967086690395,
     "shop_log": 1446017729340379246, # Pokemon Confirmation Deal Embed Message
     "shop_main": 1446018190093058222, # Shop interface
+    "LOGIN_LOG_CHANNEL_ID" = 1455496870003740736, # Channel for Login Reminders
     "chat_channel": 975275349573271552 # Daily Task Channel
 }
 
@@ -585,12 +586,16 @@ async def login(ctx):
     
     total_cash = base_cash + streak_bonus
     
-    # 4. Update Database
+   # 4. Update Database
     wallets_col.update_one(
         {"user_id": uid},
         {
             "$inc": {"balance": total_cash, "shiny_coins": base_sc},
-            "$set": {"last_login": now, "login_streak": current_streak}
+            "$set": {
+                "last_login": now, 
+                "login_streak": current_streak,
+                "reminder_sent": False # <--- CRITICAL: Resets the reminder for next time
+            }
         },
         upsert=True
     )
@@ -2808,6 +2813,90 @@ async def botinfo(ctx):
     await ctx.send(embed=embed, view=view)
 
 # ---------- RUN ----------
+# ==============================================================================
+#  LOGIN REMINDER SYSTEM
+# ==============================================================================
+
+@bot.hybrid_command(name="remindlogin", description="Toggle daily login reminders.")
+async def remindlogin(ctx):
+    uid = str(ctx.author.id)
+    
+    # 1. Fetch User
+    user = wallets_col.find_one({"user_id": uid})
+    if not user:
+        # Create wallet if doesn't exist so we can save preference
+        get_wallet(uid) 
+        user = wallets_col.find_one({"user_id": uid})
+
+    # 2. Toggle Status
+    current_status = user.get("remind_login", False)
+    new_status = not current_status
+    
+    wallets_col.update_one({"user_id": uid}, {"$set": {"remind_login": new_status}})
+    
+    # 3. Response
+    status_text = "Enabled" if new_status else "Disabled"
+    color = 0x2ecc71 if new_status else 0xff0000
+    emoji = E_GOLD_TICK if new_status else E_ERROR
+    
+    embed = create_embed(f"{emoji} Reminder {status_text}", 
+                         f"You will {'now' if new_status else 'no longer'} be pinged when your Daily Login is ready.", 
+                         color)
+    await ctx.send(embed=embed)
+
+async def check_login_reminders():
+    """Checks for expired login cooldowns and pings users."""
+    await bot.wait_until_ready()
+    channel = bot.get_channel(LOGIN_LOG_CHANNEL_ID)
+    
+    while not bot.is_closed():
+        if channel:
+            now = datetime.now()
+            # Find users who:
+            # 1. Have reminders enabled
+            # 2. Have NOT been reminded yet for this cycle
+            # 3. Have a last_login date recorded
+            users = wallets_col.find({
+                "remind_login": True,
+                "reminder_sent": False, # This flag resets when they use .login
+                "last_login": {"$ne": None}
+            })
+
+            for user in users:
+                last_login = user["last_login"]
+                # Ensure last_login is datetime
+                if not isinstance(last_login, datetime): continue
+                
+                next_claim = last_login + timedelta(hours=24)
+                
+                # Check if time has passed
+                if now >= next_claim:
+                    # OFFINE CATCH-UP LOGIC:
+                    # Only remind if the deadline passed within the last 12 hours.
+                    # If it's been days, don't spam them.
+                    time_diff = now - next_claim
+                    if time_diff < timedelta(hours=12):
+                        try:
+                            # Construct Premium Embed
+                            embed = discord.Embed(
+                                title=f"{E_TIMER} Login Ready!",
+                                description=f"Your 24-hour cooldown has ended.\nUse `/login` now to keep your streak alive!",
+                                color=0x3498db
+                            )
+                            embed.add_field(name=f"{E_BOOST} Current Streak", value=f"**{user.get('login_streak', 0)} Days**", inline=True)
+                            embed.set_footer(text="Disable this via /remindlogin")
+                            if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
+
+                            # Send Ping + Embed
+                            await channel.send(content=f"<@{user['user_id']}>", embed=embed)
+                        except Exception as e:
+                            print(f"[Reminder Error] Could not msg {user['user_id']}: {e}")
+
+                    # Mark as sent so we don't spam
+                    wallets_col.update_one({"_id": user["_id"]}, {"$set": {"reminder_sent": True}})
+
+        await asyncio.sleep(60) # Check every minute
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -2823,6 +2912,10 @@ async def on_ready():
         if not hasattr(bot, 'market_task_started'):
             bot.loop.create_task(market_simulation_task())
             bot.market_task_started = True
+
+        if not hasattr(bot, 'reminders_started'):
+        bot.loop.create_task(check_login_reminders())
+        bot.reminders_started = True
             
         # 3. START GIVEAWAY RECOVERY (The Fix)
         bot.loop.create_task(check_active_giveaways())
@@ -2859,6 +2952,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
