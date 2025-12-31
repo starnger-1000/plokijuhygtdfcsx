@@ -2817,6 +2817,13 @@ async def botinfo(ctx):
 #  LOGIN REMINDER SYSTEM
 # ==============================================================================
 
+# ==============================================================================
+#  LOGIN REMINDER SYSTEM
+# ==============================================================================
+
+# Define the ID here so it works standalone
+LOGIN_LOG_CHANNEL_ID = 1455496870003740736
+
 @bot.hybrid_command(name="remindlogin", description="Toggle daily login reminders.")
 async def remindlogin(ctx):
     uid = str(ctx.author.id)
@@ -2847,7 +2854,12 @@ async def remindlogin(ctx):
 async def check_login_reminders():
     """Checks for expired login cooldowns and pings users."""
     await bot.wait_until_ready()
-    channel = bot.get_channel(LOGIN_LOG_CHANNEL_ID["login_log"])
+    
+    # FIX: Use the variable directly, do not use ["login_log"]
+    channel = bot.get_channel(LOGIN_LOG_CHANNEL_ID)
+    
+    if not channel:
+        print(f"[Warning] Login Log Channel (ID: {LOGIN_LOG_CHANNEL_ID}) not found.")
     
     while not bot.is_closed():
         if channel:
@@ -2863,20 +2875,19 @@ async def check_login_reminders():
             })
 
             for user in users:
-                last_login = user["last_login"]
-                # Ensure last_login is datetime
-                if not isinstance(last_login, datetime): continue
-                
-                next_claim = last_login + timedelta(hours=24)
-                
-                # Check if time has passed
-                if now >= next_claim:
-                    # OFFINE CATCH-UP LOGIC:
-                    # Only remind if the deadline passed within the last 12 hours.
-                    # If it's been days, don't spam them.
-                    time_diff = now - next_claim
-                    if time_diff < timedelta(hours=12):
-                        try:
+                try:
+                    last_login = user["last_login"]
+                    # Ensure last_login is datetime
+                    if not isinstance(last_login, datetime): continue
+                    
+                    next_claim = last_login + timedelta(hours=24)
+                    
+                    # Check if time has passed
+                    if now >= next_claim:
+                        # OFFINE CATCH-UP LOGIC:
+                        # Only remind if the deadline passed within the last 12 hours.
+                        time_diff = now - next_claim
+                        if time_diff < timedelta(hours=12):
                             # Construct Premium Embed
                             embed = discord.Embed(
                                 title=f"{E_TIMER} Login Ready!",
@@ -2889,11 +2900,11 @@ async def check_login_reminders():
 
                             # Send Ping + Embed
                             await channel.send(content=f"<@{user['user_id']}>", embed=embed)
-                        except Exception as e:
-                            print(f"[Reminder Error] Could not msg {user['user_id']}: {e}")
 
-                    # Mark as sent so we don't spam
-                    wallets_col.update_one({"_id": user["_id"]}, {"$set": {"reminder_sent": True}})
+                        # Mark as sent so we don't spam
+                        wallets_col.update_one({"_id": user["_id"]}, {"$set": {"reminder_sent": True}})
+                except Exception as e:
+                    print(f"[Reminder Loop Error] {e}")
 
         await asyncio.sleep(60) # Check every minute
 
@@ -2954,6 +2965,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
