@@ -2234,36 +2234,42 @@ async def servertradehistory(ctx):
         
     view = Paginator(ctx, data, f"{E_STARS} Server Trade Logs", 0xf1c40f)
     await ctx.send(embed=view.get_embed(), view=view)
-
 # ===========================
 #   GROUP 5: GIVEAWAYS
 # ===========================
 
-# ==============================================================================
-#  GIVEAWAY SECTION (UI & COMMANDS)
-# ==============================================================================
-
-# ==============================================================================
-#  GIVEAWAY SECTION (UI & COMMANDS) - EMOJI FIXED
-# ==============================================================================
-
-# 1. THE VIEW (UI)
 class GiveawayView(View):
-    def __init__(self, giveaway_id=None, required_role_id=None):
+    def __init__(self):
+        # 1. Timeout MUST be None for buttons to work after restart
+        # 2. We do NOT pass giveaway_id or role_id here. 
+        #    We fetch them from the DB inside the button callback using the message ID.
         super().__init__(timeout=None) 
-        self.giveaway_id = giveaway_id
-        self.required_role_id = required_role_id
 
-    @discord.ui.button(label="React to Enter", emoji=discord.PartialEmoji.from_str(E_GIVEAWAY), style=discord.ButtonStyle.success, custom_id="gw_join")
+    @discord.ui.button(label="React to Enter", style=discord.ButtonStyle.success, custom_id="gw_join", emoji="🎉")
     async def join_button(self, interaction: discord.Interaction, button: Button):
         if db is None: return
-        gw = giveaways_col.find_one({"message_id": interaction.message.id})
-        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} Ended.", 0xff0000), ephemeral=True)
-
-        if gw.get("type") == "req":
-            role = interaction.guild.get_role(int(gw["required_role_id"]))
-            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} Missing {role.mention}", 0xff0000), ephemeral=True)
         
+        # 1. Fetch Giveaway Data using the Message ID
+        gw = giveaways_col.find_one({"message_id": interaction.message.id})
+        
+        if not gw:
+            return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} Giveaway data not found (Manual delete?).", 0xff0000), ephemeral=True)
+            
+        if gw.get("ended"): 
+            return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} This giveaway has ended.", 0xff0000), ephemeral=True)
+
+        # 2. Check Requirements (Role)
+        if gw.get("type") == "req":
+            # Safely handle missing role ID
+            rid = gw.get("required_role_ids") or gw.get("required_role_id")
+            if rid:
+                role = interaction.guild.get_role(int(rid))
+                if not role:
+                     pass # Role might be deleted, ignore or handle
+                elif role not in interaction.user.roles: 
+                    return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} Missing required role: {role.mention}", 0xff0000), ephemeral=True)
+        
+        # 3. Calculate Entries (Donor Logic)
         entries = 1
         if gw.get("type") == "donor":
             user_roles = [r.id for r in interaction.user.roles]
@@ -2271,35 +2277,58 @@ class GiveawayView(View):
             for rid, mul in DONOR_ROLES.items():
                 if rid in user_roles: 
                     has_donor = True
+                    # Take the highest multiplier
                     if mul > entries: entries = mul
-            if not has_donor: return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} Donor Only.", 0xff0000), ephemeral=True)
+            
+            if not has_donor: 
+                return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} You need a Donor Role to join.", 0xff0000), ephemeral=True)
 
-        if giveaways_col.find_one({"message_id": interaction.message.id, "participants.user_id": interaction.user.id}):
-            return await interaction.response.send_message(embed=create_embed("Info", f"{E_ALERT} Joined.", 0x95a5a6), ephemeral=True)
+        # 4. Check if Already Joined
+        # We check if the user ID is already in the participants list
+        is_joined = False
+        for p in gw.get("participants", []):
+            if str(p['user_id']) == str(interaction.user.id):
+                is_joined = True
+                break
         
-        giveaways_col.update_one({"message_id": interaction.message.id}, {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}})
+        if is_joined:
+            return await interaction.response.send_message(embed=create_embed("Info", f"{E_ALERT} You have already joined.", 0x95a5a6), ephemeral=True)
         
-        # --- QUEST HOOK ---
+        # 5. Add to Database
+        giveaways_col.update_one(
+            {"message_id": interaction.message.id}, 
+            {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}}
+        )
+        
+        # 6. Quest Hook (Try/Except to prevent crashes if Quest system isn't loaded yet)
         try: await update_quest(interaction.user.id, "giveaway", 1)
-        except Exception: pass
-        # ------------------
+        except: pass
 
         await interaction.response.send_message(embed=create_embed("Success", f"{E_SUCCESS} Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
 
-    @discord.ui.button(label="List", emoji=discord.PartialEmoji.from_str(E_BOOK), style=discord.ButtonStyle.secondary, custom_id="gw_list")
+    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
     async def list_button(self, interaction: discord.Interaction, button: Button):
         gw = giveaways_col.find_one({"message_id": interaction.message.id})
-        parts = gw.get("participants", []) if gw else []
+        if not gw: return await interaction.response.send_message("Giveaway not found.", ephemeral=True)
         
-        if not parts: return await interaction.response.send_message(embed=create_embed("Participants", "No entries yet.", 0x95a5a6), ephemeral=True)
+        parts = gw.get("participants", [])
+        
+        if not parts: 
+            return await interaction.response.send_message(embed=create_embed("Participants", "No entries yet.", 0x95a5a6), ephemeral=True)
 
+        # Show first 20 participants
         display_text = ""
-        for p in parts[:20]: display_text += f"<@{p['user_id']}> ({p['entries']}x)\n"
-        if len(parts) > 20: display_text += f"\n...and {len(parts)-20} more."
+        count = 0
+        for p in parts:
+            if count >= 20:
+                display_text += f"\n...and {len(parts)-20} more."
+                break
+            display_text += f"• <@{p['user_id']}> ({p['entries']}x)\n"
+            count += 1
             
         await interaction.response.send_message(embed=create_embed(f"Participants ({len(parts)})", display_text, 0x3498db), ephemeral=True)
 
-# 2. THE HELPER FUNCTION
+# 2. THE HELPER FUNCTION (Logic Fixed)
 async def run_giveaway(ctx, prize, winners, seconds, desc, required_role_ids, weighted, image_url):
     end_time = int(datetime.now().timestamp() + seconds)
     embed = discord.Embed(title=f"{E_GIVEAWAY} {prize}", description=desc, color=0xe74c3c)
@@ -2310,9 +2339,16 @@ async def run_giveaway(ctx, prize, winners, seconds, desc, required_role_ids, we
     embed.set_footer(text=f"Click the button to enter!") 
     
     msg = await ctx.send(embed=embed)
+    try: await msg.add_reaction(discord.PartialEmoji.from_str(E_GIVEAWAY))
+    except: pass
     
+    # DETERMINE TYPE CORRECTLY
+    g_type = "standard"
+    if weighted: g_type = "donor"
+    elif required_role_ids: g_type = "req"
+
     giveaways_col.insert_one({
-        "message_id": msg.id, "channel_id": ctx.channel.id, "type": "donor" if weighted else "standard", 
+        "message_id": msg.id, "channel_id": ctx.channel.id, "type": g_type, 
         "prize": prize, "winners": winners, "end_time": end_time, "participants": [], "ended": False,
         "required_role_ids": required_role_ids, "weighted": weighted
     })
@@ -2327,7 +2363,7 @@ async def run_giveaway(ctx, prize, winners, seconds, desc, required_role_ids, we
 @bot.hybrid_command(name="gstart_donor", description="Admin: Donor Giveaway.")
 @commands.has_permissions(administrator=True)
 async def gstart_donor(ctx, time_str: str, winners: int, prize: str):
-    seconds = parse_duration(time_str) # Requires parse_duration from Part 2
+    seconds = parse_duration(time_str) 
     img = ctx.message.attachments[0].url if ctx.message.attachments else DONOR_THUMBNAIL_URL
     desc = f"**Multipliers Active!**\nRequires Donor Roles.\nClick the button to enter!"
     await run_giveaway(ctx, prize, winners, seconds, desc, list(DONOR_ROLES.keys()), True, img)
@@ -2345,7 +2381,7 @@ async def gstart_req(ctx, time_str: str, winners: int, prize: str, role: discord
     seconds = parse_duration(time_str)
     img = ctx.message.attachments[0].url if ctx.message.attachments else None
     await run_giveaway(ctx, prize, winners, seconds, f"Requires: {role.mention}", role.id, False, img)
-    
+
 # ===========================
 #   GROUP 6: NEW SHOP & INVENTORY
 # ===========================
@@ -2781,9 +2817,11 @@ class ShopSelect(Select):
         await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
 
 class ShopView(View):
-    def __init__(self, ctx):
-        super().__init__(timeout=60)
-        self.add_item(ShopSelect(ctx))
+    def __init__(self):
+        # Timeout MUST be None so the dropdown never expires
+        # NO 'ctx' argument allowed here!
+        super().__init__(timeout=None)
+        self.add_item(ShopSelect())
 
 @bot.hybrid_command(name="shop", description="Open Shop Menu.")
 async def shop(ctx):
@@ -3256,6 +3294,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
