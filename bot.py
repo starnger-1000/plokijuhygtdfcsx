@@ -2239,13 +2239,15 @@ async def servertradehistory(ctx):
 # ===========================
 
 class GiveawayView(View):
-    def __init__(self):
+    # FIX: Added ctx=None to allow passing ctx without breaking persistence
+    def __init__(self, ctx=None):
         # 1. Timeout MUST be None for buttons to work after restart
-        # 2. We do NOT pass giveaway_id or role_id here. 
-        #    We fetch them from the DB inside the button callback using the message ID.
         super().__init__(timeout=None) 
+        # 2. We store ctx, but we must handle cases where it is None (after bot restart)
+        self.ctx = ctx
 
-    @discord.ui.button(label="React to Enter", style=discord.ButtonStyle.success, custom_id="gw_join", emoji="🎉")
+    # FIX: Use the variable 'E_GIVEAWAY' instead of the string "🎉"
+    @discord.ui.button(label="React to Enter", style=discord.ButtonStyle.success, custom_id="gw_join", emoji=E_GIVEAWAY)
     async def join_button(self, interaction: discord.Interaction, button: Button):
         if db is None: return
         
@@ -2306,7 +2308,8 @@ class GiveawayView(View):
 
         await interaction.response.send_message(embed=create_embed("Success", f"{E_SUCCESS} Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
 
-    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
+    # FIX: Use the variable 'E_LIST' instead of the string "📋"
+    @discord.ui.button(label="List", emoji=E_LIST, style=discord.ButtonStyle.secondary, custom_id="gw_list")
     async def list_button(self, interaction: discord.Interaction, button: Button):
         gw = giveaways_col.find_one({"message_id": interaction.message.id})
         if not gw: return await interaction.response.send_message("Giveaway not found.", ephemeral=True)
@@ -2817,11 +2820,9 @@ class ShopSelect(Select):
         await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
 
 class ShopView(View):
-    def __init__(self):
-        # Timeout MUST be None so the dropdown never expires
-        # NO 'ctx' argument allowed here!
-        super().__init__(timeout=None)
-        self.add_item(ShopSelect())
+    def __init__(self, ctx):
+        super().__init__(timeout=60)
+        self.add_item(ShopSelect(ctx))
 
 @bot.hybrid_command(name="shop", description="Open Shop Menu.")
 async def shop(ctx):
@@ -3294,6 +3295,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
