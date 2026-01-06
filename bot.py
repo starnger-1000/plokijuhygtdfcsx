@@ -140,6 +140,7 @@ if db is not None:
     redeem_codes_col = db.redeem_codes
     message_counts_col = db.message_counts
     pending_shop_approvals = db.pending_shop_approvals # New collection for Shop Approvals
+    quests_col = db.quests
 
 def get_next_id(sequence_name):
     if db is None: return 0
@@ -414,6 +415,9 @@ async def on_message(message):
             {"$inc": {"count": 1}},
             upsert=True
         )
+    
+        await update_quest(message.author.id, "msgs", 1)
+        
     await bot.process_commands(message)
 
 def get_group_total_shares(group_name):
@@ -541,6 +545,9 @@ async def daily(ctx):
         {"$inc": {"balance": 150000, "shiny_coins": 50}, "$set": {"last_daily": datetime.now()}}, 
         upsert=True
     )
+    
+    await update_quest(ctx.author.id, "daily_cmd", 1)
+    
     await ctx.send(embed=create_embed(f"{E_GIVEAWAY} Daily Claimed", f"You received:\n+$10,000 {E_MONEY}\n+5 {E_SHINY}", 0x2ecc71))
 
 # ==============================================================================
@@ -603,6 +610,10 @@ async def login(ctx):
         },
         upsert=True
     )
+    
+    await update_quest(ctx.author.id, "login", 1)           # Daily Task
+    await update_quest(ctx.author.id, "login_days", 1)      # Weekly/Monthly/Yearly
+    await update_quest(ctx.author.id, "login_streak", 1)    # Update progress (logic handles accumulation)
     
     # 5. Build Premium Embed
     desc = (
@@ -743,6 +754,220 @@ async def leavegroup(ctx, name: str):
     past_entities_col.insert_one({"user_id": str(ctx.author.id), "type": "ex_member", "name": gname, "timestamp": datetime.now()})
     log_user_activity(ctx.author.id, "Group", f"Left group {name}.")
     await ctx.send(embed=create_embed(f"{E_DANGER} Left Group", f"Left **{name}**. Penalty: **${penalty:,}**.", 0xff0000))
+
+# ==============================================================================
+#  QUEST SYSTEM
+# ==============================================================================
+
+# Quest Configuration
+QUEST_CONFIG = {
+    "daily": {
+        "duration": 86400, # 24 Hours
+        "bonus": 250000,
+        "tasks": {
+            "daily_cmd": {"target": 1, "desc": "Claim .daily", "reward": 150000},
+            "login": {"target": 1, "desc": "Login once", "reward": 10000},
+            "trade": {"target": 1, "desc": "Trade with a user", "reward": 25000},
+            "event": {"target": 1, "desc": "Participate in Event", "reward": 30000},
+            "giveaway": {"target": 1, "desc": "Enter a Giveaway", "reward": 15000},
+            "shop": {"target": 1, "desc": "Buy from Shop", "reward": 100000}
+        }
+    },
+    "weekly": {
+        "duration": 604800, # 7 Days
+        "bonus": 1000000,
+        "tasks": {
+            "msgs": {"target": 1000, "desc": "Chat Messages", "reward": 550000},
+            "login_days": {"target": 7, "desc": "Login Days", "reward": 100000},
+            "trade": {"target": 8, "desc": "Trades Completed", "reward": 125000},
+            "event": {"target": 10, "desc": "Events Participated", "reward": 130000},
+            "giveaway": {"target": 7, "desc": "Giveaways Entered", "reward": 150000},
+            "shop": {"target": 5, "desc": "Shop Purchases", "reward": 100000}
+        }
+    },
+    "monthly": {
+        "duration": 2592000, # 30 Days
+        "bonus": 2500000,
+        "tasks": {
+            "msgs": {"target": 5000, "desc": "Chat Messages", "reward": 2000000},
+            "login_days": {"target": 30, "desc": "Login Days", "reward": 1000000},
+            "trade": {"target": 25, "desc": "Trades Completed", "reward": 1500000},
+            "event": {"target": 30, "desc": "Events Participated", "reward": 1300000},
+            "giveaway": {"target": 30, "desc": "Giveaways Entered", "reward": 1500000},
+            "shop": {"target": 15, "desc": "Shop Purchases", "reward": 1000000},
+            "duelist_club": {"target": 1, "desc": "Register Duelist/Buy Club", "reward": 1000000},
+            "shares": {"target": 1, "desc": "Buy/Sell Shares", "reward": 500000}
+        }
+    },
+    "yearly": {
+        "duration": 31536000, # 365 Days
+        "bonus": 500000000,
+        "tasks": {
+            "msgs": {"target": 70000, "desc": "Chat Messages", "reward": 250000000},
+            "login_days": {"target": 365, "desc": "Login Days", "reward": 100000000},
+            "trade": {"target": 150, "desc": "Trades Completed", "reward": 1500000},
+            "event": {"target": 1500, "desc": "Events Participated", "reward": 150000000},
+            "giveaway": {"target": 500, "desc": "Giveaways Entered", "reward": 150000000},
+            "shop": {"target": 150, "desc": "Shop Purchases", "reward": 100000000},
+            "invest": {"target": 50000000, "desc": "Club/Share Value Bought", "reward": 100000000}
+        }
+    },
+    "career": {
+        "duration": None, # Never resets
+        "bonus": 2000000000,
+        "tasks": {
+            "msgs": {"target": 150000, "desc": "Chat Messages", "reward": 1000000000},
+            "login_streak": {"target": 150, "desc": "Login Streak", "reward": 50000000},
+            "trade": {"target": 50, "desc": "Trades Completed", "reward": 25000000},
+            "event": {"target": 50, "desc": "Events Participated", "reward": 15000000},
+            "giveaway": {"target": 150, "desc": "Giveaways Entered", "reward": 15000000},
+            "shop": {"target": 150, "desc": "Shop Purchases", "reward": 80000000},
+            "club_val": {"target": 150000000, "desc": "Buy Club Worth 150m", "reward": 300000000},
+            "share_val": {"target": 100000000, "desc": "Share Trade Volume", "reward": 150000000}
+        }
+    }
+}
+
+def get_quest_data(user_id):
+    """Fetch or create quest data for user, handling resets."""
+    uid = str(user_id)
+    data = quests_col.find_one({"user_id": uid})
+    now = datetime.now()
+    
+    if not data:
+        data = {
+            "user_id": uid,
+            "daily": {"start": now, "claimed_bonus": False, "tasks": {}},
+            "weekly": {"start": now, "claimed_bonus": False, "tasks": {}},
+            "monthly": {"start": now, "claimed_bonus": False, "tasks": {}},
+            "yearly": {"start": now, "claimed_bonus": False, "tasks": {}},
+            "career": {"start": now, "claimed_bonus": False, "tasks": {}}
+        }
+        quests_col.insert_one(data)
+        return data
+
+    # Check Resets
+    updates = {}
+    for q_type in ["daily", "weekly", "monthly", "yearly"]:
+        start_time = data[q_type]["start"]
+        if not isinstance(start_time, datetime): start_time = now
+        
+        duration = QUEST_CONFIG[q_type]["duration"]
+        if (now - start_time).total_seconds() > duration:
+            # Reset this category
+            updates[f"{q_type}"] = {"start": now, "claimed_bonus": False, "tasks": {}}
+    
+    if updates:
+        quests_col.update_one({"user_id": uid}, {"$set": updates})
+        data.update(updates)
+        
+    return data
+
+async def update_quest(user_id, task_key, amount=1):
+    """Updates progress for a specific task across all applicable timeframes."""
+    data = get_quest_data(user_id)
+    updates = {}
+    
+    for q_type in ["daily", "weekly", "monthly", "yearly", "career"]:
+        cfg = QUEST_CONFIG[q_type]["tasks"]
+        
+        # Check if this task exists in this timeframe
+        if task_key in cfg:
+            current = data[q_type]["tasks"].get(task_key, 0)
+            target = cfg[task_key]["target"]
+            
+            new_amount = current + amount
+            updates[f"{q_type}.tasks.{task_key}"] = new_amount
+            
+            # Auto-Claim Task Reward
+            claimed_key = f"claimed_{task_key}"
+            is_claimed = data[q_type].get("claimed", {}).get(task_key, False)
+            
+            if new_amount >= target and not is_claimed:
+                reward = cfg[task_key]["reward"]
+                wallets_col.update_one({"user_id": str(user_id)}, {"$inc": {"balance": reward}})
+                updates[f"{q_type}.claimed.{task_key}"] = True
+
+    if updates:
+        quests_col.update_one({"user_id": str(user_id)}, {"$set": updates})
+
+async def show_quest_menu(ctx, q_type):
+    data = get_quest_data(ctx.author.id)
+    q_data = data[q_type]
+    cfg = QUEST_CONFIG[q_type]
+    
+    # Time Remaining
+    if q_type == "career":
+        time_str = "∞ (Lifetime)"
+    else:
+        end_time = q_data["start"] + timedelta(seconds=cfg["duration"])
+        time_str = f"<t:{int(end_time.timestamp())}:R>"
+
+    desc = f"**Time Remaining:** {time_str}\n\n"
+    
+    tasks_completed = 0
+    total_tasks = len(cfg["tasks"])
+    
+    for key, info in cfg["tasks"].items():
+        current = q_data["tasks"].get(key, 0)
+        target = info["target"]
+        reward = info["reward"]
+        # Safe check for claimed status
+        claimed = q_data.get("claimed", {}).get(key, False)
+        
+        # Progress Bar
+        pct = min(1.0, current / target) if target > 0 else 0
+        bar_len = 8
+        fill = int(pct * bar_len)
+        bar = "🟦" * fill + "⬜" * (bar_len - fill)
+        
+        status_text = f"**{E_GOLD_TICK} Claimed**" if claimed else (f"**{E_ACTIVE} Ready**" if current >= target else f"`{current}/{target}`")
+        
+        desc += f"**{info['desc']}**\n{bar} {status_text} | {E_MONEY} ${reward:,}\n\n"
+        
+        if current >= target: tasks_completed += 1
+
+    # Bonus Reward Status
+    bonus_claimed = q_data.get("claimed_bonus", False)
+    if tasks_completed >= total_tasks and not bonus_claimed:
+        # Auto Claim Bonus
+        wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": cfg["bonus"]}})
+        quests_col.update_one({"user_id": str(ctx.author.id)}, {"$set": {f"{q_type}.claimed_bonus": True}})
+        desc += f"\n{E_GIVEAWAY} **BONUS UNLOCKED!**\nSent: {E_MONEY} **${cfg['bonus']:,}**"
+    elif bonus_claimed:
+         desc += f"\n{E_GOLD_TICK} **Bonus Claimed:** {E_MONEY} ${cfg['bonus']:,}"
+    else:
+         desc += f"\n{E_CROWN} **Completion Bonus:** {E_MONEY} ${cfg['bonus']:,}"
+
+    embed = create_embed(f"{E_BOOK} {q_type.title()} Quests", desc, 0x9b59b6)
+    if ctx.author.avatar: embed.set_thumbnail(url=ctx.author.avatar.url)
+    await ctx.send(embed=embed)
+
+# Commands
+@bot.hybrid_command(name="dailyquest", aliases=["dq"], description="View Daily Quests.")
+async def dailyquest(ctx): await show_quest_menu(ctx, "daily")
+
+@bot.hybrid_command(name="weeklyquest", aliases=["wq"], description="View Weekly Quests.")
+async def weeklyquest(ctx): await show_quest_menu(ctx, "weekly")
+
+@bot.hybrid_command(name="monthlyquest", aliases=["mq"], description="View Monthly Quests.")
+async def monthlyquest(ctx): await show_quest_menu(ctx, "monthly")
+
+@bot.hybrid_command(name="yearlyquest", aliases=["yq"], description="View Yearly Quests.")
+async def yearlyquest(ctx): await show_quest_menu(ctx, "yearly")
+
+@bot.hybrid_command(name="careerquest", aliases=["cq"], description="View Career Quests.")
+async def careerquest(ctx): await show_quest_menu(ctx, "career")
+
+@bot.hybrid_command(name="questcomplete", description="Admin: Manually complete an event quest for a user.")
+@commands.has_permissions(administrator=True)
+async def questcomplete(ctx, event_type: str, member: discord.Member):
+    if event_type not in ["event", "giveaway"]:
+        return await ctx.send(embed=create_embed("Error", "Type must be 'event' or 'giveaway'.", 0xff0000))
+    
+    await update_quest(member.id, event_type, 1)
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Updated", f"Added +1 {event_type} progress for {member.mention}.", 0x2ecc71))
+    
 # bot.py Part 2 of 4 - Club Market, Auctions & Football
 # ... (Continued from Part 1)
 
@@ -939,6 +1164,11 @@ async def sellshares(ctx, club_name: str, buyer: discord.Member, percentage: int
         group_members_col.update_one({"_id": seller["_id"]}, {"$inc": {"share_percentage": -percentage}})
         group_members_col.update_one({"group_name": gname, "user_id": str(buyer.id)}, {"$inc": {"share_percentage": percentage}}, upsert=True)
         log_user_activity(ctx.author.id, "Sale", f"Sold {percentage}% shares of {gname}.")
+        try:
+            await update_quest(ctx.author.id, "shares", 1) # For Seller
+            await update_quest(buyer.id, "shares", 1)      # For Buyer
+        except: pass
+        # ---------------------------
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Sold", "Shares transferred.", 0x2ecc71))
 
 @bot.hybrid_command(name="marketlist", aliases=["ml"], description="View unsold clubs.")
@@ -963,6 +1193,10 @@ async def buyclub(ctx, club_name: str):
     wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": -price}})
     deal_id = get_next_id("deal_id")
     pending_deals_col.insert_one({"id": deal_id, "type": "user", "buyer_id": str(ctx.author.id), "club_id": c["id"], "club_name": c["name"], "price": price, "timestamp": datetime.now()})
+    # 👇 QUEST HOOK ADDED HERE 👇
+    try: await update_quest(ctx.author.id, "duelist_club", 1)
+    except: pass
+    # ---------------------------
     embed = discord.Embed(title=f"{E_TIMER} Deal Pending", description=f"Request to buy **{c['name']}** submitted.\n\n{E_MONEY} **Funds Held:** ${price:,}\n{E_ADMIN} **Status:** Waiting for Admin Approval\n{E_ITEMBOX} **Deal ID:** {deal_id}", color=0xf1c40f)
     if c.get("logo"): embed.set_thumbnail(url=c["logo"])
     await ctx.send(embed=embed)
@@ -1242,6 +1476,9 @@ class TradeFinalView(View):
         transfer_assets(u1, u2)
         transfer_assets(u2, u1)
 
+        await update_quest(u1, "trade", 1)
+        await update_quest(u2, "trade", 1)
+
         # Cleanup
         del active_trades[u1]
         del active_trades[u2]
@@ -1455,6 +1692,10 @@ async def registerduelist(ctx, username: str, base_price: HumanInt, salary: Huma
     did = get_next_id("duelist_id")
     avatar = ctx.author.avatar.url if ctx.author.avatar else ""
     duelists_col.insert_one({"id": did, "discord_user_id": str(ctx.author.id), "username": username, "base_price": base_price, "expected_salary": salary, "avatar_url": avatar, "owned_by": None, "club_id": None})
+    # 👇 QUEST HOOK ADDED HERE 👇
+    try: await update_quest(ctx.author.id, "duelist_club", 1)
+    except: pass
+    # ---------------------------
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Registered", f"Duelist **{username}** (ID: {did})", 0x9b59b6))
 
 @bot.hybrid_command(name="retireduelist", aliases=["ret"], description="Retire a duelist.")
@@ -1973,6 +2214,63 @@ async def servertradehistory(ctx):
 #   GROUP 5: GIVEAWAYS
 # ===========================
 
+# ==============================================================================
+#  GIVEAWAY SECTION (UI & COMMANDS)
+# ==============================================================================
+
+# 1. THE VIEW (UI)
+class GiveawayView(View):
+    def __init__(self, giveaway_id=None, required_role_id=None):
+        super().__init__(timeout=None) 
+        self.giveaway_id = giveaway_id
+        self.required_role_id = required_role_id
+
+    @discord.ui.button(label="React to Enter", emoji=E_GIVEAWAY, style=discord.ButtonStyle.success, custom_id="gw_join")
+    async def join_button(self, interaction: discord.Interaction, button: Button):
+        if db is None: return
+        gw = giveaways_col.find_one({"message_id": interaction.message.id})
+        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", "❌ Ended.", 0xff0000), ephemeral=True)
+
+        if gw.get("type") == "req":
+            role = interaction.guild.get_role(int(gw["required_role_id"]))
+            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"Missing {role.mention}", 0xff0000), ephemeral=True)
+        
+        entries = 1
+        if gw.get("type") == "donor":
+            user_roles = [r.id for r in interaction.user.roles]
+            has_donor = False
+            for rid, mul in DONOR_ROLES.items():
+                if rid in user_roles: 
+                    has_donor = True
+                    if mul > entries: entries = mul
+            if not has_donor: return await interaction.response.send_message(embed=create_embed("Req", "❌ Donor Only.", 0xff0000), ephemeral=True)
+
+        if giveaways_col.find_one({"message_id": interaction.message.id, "participants.user_id": interaction.user.id}):
+            return await interaction.response.send_message(embed=create_embed("Info", "⚠️ Joined.", 0x95a5a6), ephemeral=True)
+        
+        giveaways_col.update_one({"message_id": interaction.message.id}, {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}})
+        
+        # --- QUEST HOOK ---
+        try: await update_quest(interaction.user.id, "giveaway", 1)
+        except Exception: pass
+        # ------------------
+
+        await interaction.response.send_message(embed=create_embed("Success", f"✅ Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
+
+    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
+    async def list_button(self, interaction: discord.Interaction, button: Button):
+        # Optional: if not interaction.user.guild_permissions.administrator: return
+        gw = giveaways_col.find_one({"message_id": interaction.message.id})
+        parts = gw.get("participants", []) if gw else []
+        
+        if not parts: return await interaction.response.send_message(embed=create_embed("Participants", "No entries yet.", 0x95a5a6), ephemeral=True)
+
+        display_text = ""
+        for p in parts[:20]: display_text += f"<@{p['user_id']}> ({p['entries']}x)\n"
+        if len(parts) > 20: display_text += f"\n...and {len(parts)-20} more."
+            
+        await interaction.response.send_message(embed=create_embed(f"Participants ({len(parts)})", display_text, 0x3498db), ephemeral=True)
+    
 async def run_giveaway(ctx, prize, winners_count, duration_seconds, description, required_role_ids=None, weighted=False, image_url=None):
     end_time = int(datetime.now().timestamp() + duration_seconds)
     embed = discord.Embed(title=f"{E_GIVEAWAY} {prize}", description=description, color=0xe74c3c)
@@ -2447,6 +2745,9 @@ async def buy(ctx, item_id: str, coupon_code: str = None):
             seller_user = await bot.fetch_user(int(item['seller_id']))
             await seller_user.send(embed=create_embed(f"{E_PC} Purchase Request", f"User {ctx.author.name} wants to buy **{item['name']}**.\nWaiting for Admin Approval.", 0x3498db))
         except: pass
+
+    try: await update_quest(ctx.author.id, "shop", 1)
+    except: pass
     
     await ctx.send(embed=create_embed(f"{E_TIMER} Request Sent", f"Purchase request submitted for **{item['name']}**.\n**Cost:** {buyer_pays:,} {emoji_curr}\n{coupon_msg}\n{E_ADMIN} Waiting for Admin Approval.", 0xf1c40f))
 
@@ -2968,6 +3269,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
