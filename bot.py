@@ -967,6 +967,31 @@ async def questcomplete(ctx, event_type: str, member: discord.Member):
     
     await update_quest(member.id, event_type, 1)
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Updated", f"Added +1 {event_type} progress for {member.mention}.", 0x2ecc71))
+
+@bot.hybrid_command(name="event_credit", aliases=["ec", "event"], description="Admin: Give event participation credit to multiple users.")
+@commands.has_permissions(administrator=True)
+async def event_credit(ctx, members: commands.Greedy[discord.Member]):
+    """
+    Usage: .ec @User1 @User2 @User3
+    Gives +1 Event Participation count to all mentioned users.
+    """
+    if not members:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Please mention the participants.\nExample: `.ec @User1 @User2`", 0xff0000))
+    
+    count = 0
+    processed_users = []
+    
+    for m in members:
+        if not m.bot:
+            await update_quest(m.id, "event", 1)
+            processed_users.append(m.display_name)
+            count += 1
+    
+    # Format list for embed (truncate if too long)
+    user_list = ", ".join(processed_users)
+    if len(user_list) > 100: user_list = user_list[:100] + "..."
+    
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Event Credited", f"Added **+1 Event** progress to **{count}** users.\n\n**Users:** {user_list}", 0x2ecc71))
     
 # bot.py Part 2 of 4 - Club Market, Auctions & Football
 # ... (Continued from Part 1)
@@ -2218,6 +2243,10 @@ async def servertradehistory(ctx):
 #  GIVEAWAY SECTION (UI & COMMANDS)
 # ==============================================================================
 
+# ==============================================================================
+#  GIVEAWAY SECTION (UI & COMMANDS) - EMOJI FIXED
+# ==============================================================================
+
 # 1. THE VIEW (UI)
 class GiveawayView(View):
     def __init__(self, giveaway_id=None, required_role_id=None):
@@ -2225,15 +2254,15 @@ class GiveawayView(View):
         self.giveaway_id = giveaway_id
         self.required_role_id = required_role_id
 
-    @discord.ui.button(label="React to Enter", emoji=E_GIVEAWAY, style=discord.ButtonStyle.success, custom_id="gw_join")
+    @discord.ui.button(label="React to Enter", emoji=discord.PartialEmoji.from_str(E_GIVEAWAY), style=discord.ButtonStyle.success, custom_id="gw_join")
     async def join_button(self, interaction: discord.Interaction, button: Button):
         if db is None: return
         gw = giveaways_col.find_one({"message_id": interaction.message.id})
-        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", "❌ Ended.", 0xff0000), ephemeral=True)
+        if not gw or gw.get("ended"): return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} Ended.", 0xff0000), ephemeral=True)
 
         if gw.get("type") == "req":
             role = interaction.guild.get_role(int(gw["required_role_id"]))
-            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"Missing {role.mention}", 0xff0000), ephemeral=True)
+            if role and role not in interaction.user.roles: return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} Missing {role.mention}", 0xff0000), ephemeral=True)
         
         entries = 1
         if gw.get("type") == "donor":
@@ -2243,10 +2272,10 @@ class GiveawayView(View):
                 if rid in user_roles: 
                     has_donor = True
                     if mul > entries: entries = mul
-            if not has_donor: return await interaction.response.send_message(embed=create_embed("Req", "❌ Donor Only.", 0xff0000), ephemeral=True)
+            if not has_donor: return await interaction.response.send_message(embed=create_embed("Req", f"{E_ERROR} Donor Only.", 0xff0000), ephemeral=True)
 
         if giveaways_col.find_one({"message_id": interaction.message.id, "participants.user_id": interaction.user.id}):
-            return await interaction.response.send_message(embed=create_embed("Info", "⚠️ Joined.", 0x95a5a6), ephemeral=True)
+            return await interaction.response.send_message(embed=create_embed("Info", f"{E_ALERT} Joined.", 0x95a5a6), ephemeral=True)
         
         giveaways_col.update_one({"message_id": interaction.message.id}, {"$push": {"participants": {"user_id": interaction.user.id, "entries": entries}}})
         
@@ -2255,11 +2284,10 @@ class GiveawayView(View):
         except Exception: pass
         # ------------------
 
-        await interaction.response.send_message(embed=create_embed("Success", f"✅ Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
+        await interaction.response.send_message(embed=create_embed("Success", f"{E_SUCCESS} Joined! ({entries}x entries)", 0x2ecc71), ephemeral=True)
 
-    @discord.ui.button(label="List", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="gw_list")
+    @discord.ui.button(label="List", emoji=discord.PartialEmoji.from_str(E_BOOK), style=discord.ButtonStyle.secondary, custom_id="gw_list")
     async def list_button(self, interaction: discord.Interaction, button: Button):
-        # Optional: if not interaction.user.guild_permissions.administrator: return
         gw = giveaways_col.find_one({"message_id": interaction.message.id})
         parts = gw.get("participants", []) if gw else []
         
@@ -2270,95 +2298,54 @@ class GiveawayView(View):
         if len(parts) > 20: display_text += f"\n...and {len(parts)-20} more."
             
         await interaction.response.send_message(embed=create_embed(f"Participants ({len(parts)})", display_text, 0x3498db), ephemeral=True)
-    
-async def run_giveaway(ctx, prize, winners_count, duration_seconds, description, required_role_ids=None, weighted=False, image_url=None):
-    end_time = int(datetime.now().timestamp() + duration_seconds)
-    embed = discord.Embed(title=f"{E_GIVEAWAY} {prize}", description=description, color=0xe74c3c)
-    embed.add_field(name="Timer", value=f"{E_TIMER} Ends <t:{end_time}:R>", inline=True)
-    embed.add_field(name="Winners", value=f"{E_CROWN} {winners_count}", inline=True)
+
+# 2. THE HELPER FUNCTION
+async def run_giveaway(ctx, prize, winners, seconds, desc, required_role_ids, weighted, image_url):
+    end_time = int(datetime.now().timestamp() + seconds)
+    embed = discord.Embed(title=f"{E_GIVEAWAY} {prize}", description=desc, color=0xe74c3c)
+    embed.add_field(name="Ends", value=f"<t:{end_time}:R>")
+    embed.add_field(name="Winners", value=str(winners))
     if image_url: embed.set_image(url=image_url)
-    embed.set_footer(text="React with 🎉 to enter!")
+    
+    embed.set_footer(text=f"Click the button to enter!") 
+    
     msg = await ctx.send(embed=embed)
-    try: await msg.add_reaction("🎉") 
-    except: pass
-    view = ParticipantView(msg.id, required_role_ids)
+    
+    giveaways_col.insert_one({
+        "message_id": msg.id, "channel_id": ctx.channel.id, "type": "donor" if weighted else "standard", 
+        "prize": prize, "winners": winners, "end_time": end_time, "participants": [], "ended": False,
+        "required_role_ids": required_role_ids, "weighted": weighted
+    })
+    
+    view = GiveawayView(msg.id, required_role_ids)
     await msg.edit(view=view)
-    await asyncio.sleep(duration_seconds)
-    try: msg = await ctx.channel.fetch_message(msg.id)
-    except: return
-    reaction = None
-    target_emoji = discord.PartialEmoji.from_str(E_GIVEAWAY)
-    for r in msg.reactions:
-         if str(r.emoji) == str(target_emoji) or str(r.emoji) == "🎉":
-             reaction = r
-             break
-    users = []
-    if reaction:
-        async for user in reaction.users():
-            if not user.bot:
-                member = ctx.guild.get_member(user.id)
-                if member:
-                    users.append(member)
-    if not users:
-        return await msg.reply(embed=create_embed("Ended", "No entrants.", 0x95a5a6))
     
-    # Weighted Logic (If weighted=True)
-    pool = []
-    if weighted:
-        for u in users:
-            weight = 1
-            user_roles = [r.id for r in u.roles]
-            for rid, w in DONOR_WEIGHTS.items():
-                if rid in user_roles: weight = max(weight, w)
-            for _ in range(weight): pool.append(u)
-    else:
-        pool = users
+    await asyncio.sleep(seconds)
+    await end_giveaway(msg.id, ctx.channel, prize)
 
-    final_winners = random.sample(pool, min(len(users), winners_count)) # Sample from pool but unique logic needed if pool has dupes? 
-    # Simplify: If weighted, we use random.choices but need unique winners.
-    if weighted:
-        final_winners = []
-        while len(final_winners) < winners_count and len(pool) > 0:
-            w = random.choice(pool)
-            if w not in final_winners: final_winners.append(w)
-            # Remove all instances of w from pool to prevent dupes
-            pool = [x for x in pool if x.id != w.id]
+# 3. THE COMMANDS
+@bot.hybrid_command(name="gstart_donor", description="Admin: Donor Giveaway.")
+@commands.has_permissions(administrator=True)
+async def gstart_donor(ctx, time_str: str, winners: int, prize: str):
+    seconds = parse_duration(time_str) # Requires parse_duration from Part 2
+    img = ctx.message.attachments[0].url if ctx.message.attachments else DONOR_THUMBNAIL_URL
+    desc = f"**Multipliers Active!**\nRequires Donor Roles.\nClick the button to enter!"
+    await run_giveaway(ctx, prize, winners, seconds, desc, list(DONOR_ROLES.keys()), True, img)
+
+@bot.hybrid_command(name="gstart_daily", description="Admin: Daily Giveaway.")
+@commands.has_permissions(administrator=True)
+async def gstart_daily(ctx, time_str: str, winners: int, prize: str):
+    seconds = parse_duration(time_str) 
+    img = ctx.message.attachments[0].url if ctx.message.attachments else None
+    await run_giveaway(ctx, prize, winners, seconds, "Public Giveaway!", None, False, img)
+
+@bot.hybrid_command(name="gstart_req", description="Admin: Req Giveaway.")
+@commands.has_permissions(administrator=True)
+async def gstart_req(ctx, time_str: str, winners: int, prize: str, role: discord.Role):
+    seconds = parse_duration(time_str)
+    img = ctx.message.attachments[0].url if ctx.message.attachments else None
+    await run_giveaway(ctx, prize, winners, seconds, f"Requires: {role.mention}", role.id, False, img)
     
-    winner_mentions = ", ".join([w.mention for w in final_winners])
-    tip_amount = 0
-    try:
-        clean = prize.lower().replace(",", "").replace("$", "")
-        if "k" in clean: tip_amount = int(float(clean.replace("k", "")) * 1000)
-    except: pass
-    tip_msg = ""
-    if tip_amount > 0:
-        for w in final_winners:
-             wallets_col.update_one({"user_id": str(w.id)}, {"$inc": {"balance": tip_amount}}, upsert=True)
-        tip_msg = f"\n{E_MONEY} **Auto-Tip:** ${tip_amount:,} sent!"
-    await msg.reply(f"Congratulations {winner_mentions}! {tip_msg}")
-
-@bot.hybrid_command(name="giveaway_daily", description="Start Daily giveaway.")
-@commands.has_permissions(administrator=True)
-async def giveaway_daily(ctx, prize: str, winners: int, duration: str, image: discord.Attachment = None):
-    image_url = image.url if image else None
-    seconds = parse_duration(duration)
-    await run_giveaway(ctx, prize, winners, seconds, "Daily Luck Test!", image_url=image_url)
-
-@bot.hybrid_command(name="giveaway_shiny", description="Start Requirement giveaway.")
-@commands.has_permissions(administrator=True)
-async def giveaway_shiny(ctx, prize: str, winners: int, duration: str, required_role: discord.Role = None, image: discord.Attachment = None, *, description: str):
-    image_url = image.url if image else None
-    seconds = parse_duration(duration)
-    role_id = required_role.id if required_role else None
-    await run_giveaway(ctx, prize, winners, seconds, description, required_role_ids=role_id, weighted=False, image_url=image_url)
-
-@bot.hybrid_command(name="giveaway_donor", description="Start Donor giveaway.")
-@commands.has_permissions(administrator=True)
-async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: discord.Attachment = None):
-    image_url = image.url if image else None
-    seconds = parse_duration(duration)
-    await run_giveaway(ctx, prize, winners, seconds, "Donor Weighted!", required_role_ids=list(DONOR_WEIGHTS.keys()), weighted=True, image_url=image_url)
-
 # ===========================
 #   GROUP 6: NEW SHOP & INVENTORY
 # ===========================
@@ -3269,6 +3256,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
