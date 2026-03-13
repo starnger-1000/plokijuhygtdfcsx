@@ -17,7 +17,7 @@ import certifi
 from fastapi import FastAPI
 import uvicorn
 import threading
-
+import typing
 
 
 # ---------- CONFIGURATION ----------
@@ -1829,6 +1829,115 @@ async def forcemarket(ctx):
     embed = create_embed(f"{E_STARS} Market Force Updated", f"Successfully updated values for **{updated_count}** clubs.\n\n**Sample Changes:**\n{changes_log}", 0x2ecc71)
     await ctx.send(embed=embed)
 
+# ==============================================================================
+#  DM & POLL VIEW SYSTEM
+# ==============================================================================
+
+class DMPollView(discord.ui.View):
+    def __init__(self, poll_id: str, options: list):
+        super().__init__(timeout=None)
+        self.poll_id = poll_id
+        for i, opt in enumerate(options):
+            # Create a button for each option
+            btn = discord.ui.Button(label=opt.strip()[:80], custom_id=f"dmpoll_{poll_id}_{i}", style=discord.ButtonStyle.primary)
+            btn.callback = self.make_callback(i, opt.strip())
+            self.add_item(btn)
+
+    def make_callback(self, index, option_text):
+        async def callback(interaction: discord.Interaction):
+            # Check if collection exists/initialize
+            if db is None: return await interaction.response.send_message("Database error.", ephemeral=True)
+            
+            # Check if user already voted
+            existing = db.dm_polls.find_one({"id": self.poll_id, "voters": str(interaction.user.id)})
+            if existing:
+                return await interaction.response.send_message(f"{E_ERROR} You have already voted in this poll!", ephemeral=True)
+            
+            # Record the vote
+            db.dm_polls.update_one(
+                {"id": self.poll_id},
+                {"$push": {"voters": str(interaction.user.id)}, "$inc": {f"votes.{index}": 1}}
+            )
+            await interaction.response.send_message(f"{E_SUCCESS} Your vote for **{option_text}** has been recorded!", ephemeral=True)
+        return callback
+
+# ==============================================================================
+#  ADMIN DIRECT MESSAGE COMMANDS
+# ==============================================================================
+
+@bot.hybrid_command(name="directmessage", aliases=["dm"], description="Admin: Send an official DM embed to a Role or Member.")
+@commands.has_permissions(administrator=True)
+async def directmessage(ctx, target: typing.Union[discord.Role, discord.Member], purpose: str, context: str, poll_options: str = None):
+    """
+    Usage: .directmessage @Role "The Purpose" "The Description" "Option 1, Option 2, Option 3"
+    Leave poll_options blank if you don't want a poll.
+    """
+    await ctx.defer(ephemeral=True) # Prevent timeout if sending to a large role
+    
+    msg_id = f"m{get_next_id('dm_msg_id')}"
+    
+    # 1. Setup Poll (If options are provided)
+    options = [o.strip() for o in poll_options.split(",")] if poll_options else []
+    if len(options) > 5:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Maximum 5 poll options allowed.", 0xff0000), ephemeral=True)
+        
+    if options:
+        db.dm_polls.insert_one({
+            "id": msg_id,
+            "purpose": purpose,
+            "options": options,
+            "votes": {str(i): 0 for i in range(len(options))},
+            "voters": [],
+            "timestamp": datetime.now()
+        })
+    
+    # 2. Build the Premium Embed
+    desc = f"{context}\n\n{E_TIMER} **Date & Time:** <t:{int(datetime.now().timestamp())}:f>\n{E_CROWN} **Sent by:** {ctx.author.display_name}"
+    embed = discord.Embed(title=f"{E_ADMIN} **{purpose.upper()}**", description=desc, color=0xf1c40f)
+    embed.set_footer(text=f"ID: {msg_id} • Sent by the administration of Knowle ze kingdom, if any queries ask in ask doubts channel.")
+    if ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    
+    # 3. Determine Targets
+    success, failed = 0, 0
+    targets = [target] if isinstance(target, discord.Member) else target.members
+    
+    if not targets:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} No members found to message.", 0xff0000), ephemeral=True)
+
+    view = DMPollView(msg_id, options) if options else None
+
+    # 4. Dispatch DMs
+    for member in targets:
+        if member.bot: continue
+        try:
+            await member.send(embed=embed, view=view)
+            success += 1
+        except discord.Forbidden:
+            failed += 1 # Users who have DMs closed
+            
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Dispatch Complete", f"Message `{msg_id}` processed!\n\n{E_GOLD_TICK} **Delivered:** {success}\n{E_ERROR} **Failed (DMs Closed):** {failed}", 0x2ecc71))
+
+@bot.hybrid_command(name="checkdmpoll", aliases=["cdp"], description="Admin: Check the results of a DM poll.")
+@commands.has_permissions(administrator=True)
+async def checkdmpoll(ctx, poll_id: str):
+    poll = db.dm_polls.find_one({"id": poll_id})
+    if not poll:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Poll `{poll_id}` not found.", 0xff0000))
+        
+    total_votes = len(poll.get('voters', []))
+    desc = f"{E_BOOK} **Purpose:** {poll['purpose']}\n{E_CHAT} **Total Votes Cast:** {total_votes}\n\n"
+    
+    options = poll['options']
+    votes = poll.get('votes', {})
+    
+    for i, opt in enumerate(options):
+        count = votes.get(str(i), 0)
+        desc += f"{E_ARROW} **{opt}:** {count} votes\n"
+        
+    embed = discord.Embed(title=f"{E_ADMIN} Poll Results: {poll_id}", description=desc, color=0x3498db)
+    await ctx.send(embed=embed)
+
 @bot.hybrid_command(name="registerclub", aliases=["rc"], description="Admin: Register club.")
 @commands.has_permissions(administrator=True)
 async def registerclub(ctx, name: str, base_price: HumanInt, *, slogan: str = ""):
@@ -1995,6 +2104,87 @@ async def deduct_user(ctx, member: discord.Member, amount: HumanInt):
     wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"balance": -amount}}, upsert=True)
     log_user_activity(member.id, "Transaction", f"Deducted ${amount:,}")
     await ctx.send(embed=create_embed(f"{E_ADMIN} Admin Deduct", f"Removed **${amount:,}** from {member.mention}.", 0xff0000))
+
+# ==============================================================================
+#  MASS CURRENCY ADMIN COMMANDS
+# ==============================================================================
+
+def get_user_list_string(members):
+    """Helper to format user lists nicely without hitting Discord's embed character limits."""
+    user_list = ", ".join([m.display_name for m in members])
+    return user_list[:120] + "..." if len(user_list) > 120 else user_list
+
+@bot.hybrid_command(name="masstip", aliases=["mtip"], description="Admin: Add cash to multiple users.")
+@commands.has_permissions(administrator=True)
+async def masstip(ctx, amount: HumanInt, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.masstip <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"balance": amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Added {E_MONEY} **${amount:,}** to **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Tip", desc, 0x2ecc71))
+
+@bot.hybrid_command(name="massdeduct", aliases=["mdeduct"], description="Admin: Remove cash from multiple users.")
+@commands.has_permissions(administrator=True)
+async def massdeduct(ctx, amount: HumanInt, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.massdeduct <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"balance": -amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Removed {E_MONEY} **${amount:,}** from **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Deduct", desc, 0xe74c3c))
+
+@bot.hybrid_command(name="massaddpc", aliases=["mapc"], description="Admin: Add PC to multiple users.")
+@commands.has_permissions(administrator=True)
+async def massaddpc(ctx, amount: int, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.massaddpc <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"pc": amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Added {E_PC} **{amount:,}** to **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Add PC", desc, 0x2ecc71))
+
+@bot.hybrid_command(name="massaddsc", aliases=["masc"], description="Admin: Add Shiny Coins to multiple users.")
+@commands.has_permissions(administrator=True)
+async def massaddsc(ctx, amount: int, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.massaddsc <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"shiny_coins": amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Added {E_SHINY} **{amount:,}** to **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Add Shiny", desc, 0x2ecc71))
+
+@bot.hybrid_command(name="massremovepc", aliases=["mrpc"], description="Admin: Remove PC from multiple users.")
+@commands.has_permissions(administrator=True)
+async def massremovepc(ctx, amount: int, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.massremovepc <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"pc": -amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Removed {E_PC} **{amount:,}** from **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Remove PC", desc, 0xe74c3c))
+
+@bot.hybrid_command(name="massremovesc", aliases=["mrsc"], description="Admin: Remove Shiny Coins from multiple users.")
+@commands.has_permissions(administrator=True)
+async def massremovesc(ctx, amount: int, members: commands.Greedy[discord.Member]):
+    if not members or amount <= 0: 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Usage: `.massremovesc <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+    
+    for m in members: 
+        wallets_col.update_one({"user_id": str(m.id)}, {"$inc": {"shiny_coins": -amount}}, upsert=True)
+    
+    desc = f"{E_SUCCESS} Removed {E_SHINY} **{amount:,}** from **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Remove Shiny", desc, 0xe74c3c))
 
 @bot.hybrid_command(name="setclubmanager", aliases=["scm"], description="Admin: Set manager.")
 @commands.has_permissions(administrator=True)
@@ -2187,7 +2377,51 @@ async def remove_inv(ctx, member: discord.Member, *, item_name: str):
     
     await ctx.send(embed=create_embed(f"{E_DANGER} Removed Item", f"Removed 1x **{item['name']}** from {member.mention}.", 0xff0000))
 
+@bot.hybrid_command(name="resetinv", aliases=["ri"], description="Admin: Clear a user's entire inventory.")
+@commands.has_permissions(administrator=True)
+async def resetinv(ctx, member: discord.Member):
+    # Clears all items associated with this user ID
+    result = inventory_col.delete_many({"user_id": str(member.id)})
+    
+    desc = (
+        f"{E_ADMIN} **Action:** Full Inventory Wipe\n"
+        f"{E_CROWN} **Target User:** {member.mention}\n"
+        f"{E_DANGER} **Items Deleted:** {result.deleted_count}"
+    )
+    
+    embed = create_embed(f"{E_DANGER} Inventory Reset", desc, 0xff0000)
+    if member.avatar: 
+        embed.set_thumbnail(url=member.avatar.url)
+        
+    await ctx.send(embed=embed)
 
+@bot.hybrid_command(name="removeinventory", aliases=["rminv"], description="Admin: Delete a specific item from a user's inventory.")
+@commands.has_permissions(administrator=True)
+async def removeinventory(ctx, member: discord.Member, *, item_name: str):
+    # Smart search: Check both 'item_name' and 'name' fields (case-insensitive)
+    query_regex = {"$regex": re.escape(item_name), "$options": "i"}
+    item = inventory_col.find_one({
+        "user_id": str(member.id),
+        "$or": [{"item_name": query_regex}, {"name": query_regex}]
+    })
+    
+    if not item:
+        return await ctx.send(embed=create_embed("Item Not Found", f"{E_ERROR} {member.display_name} does not own any item matching **{item_name}**.", 0xff0000), ephemeral=True)
+    
+    # Get exact name from database record
+    found_name = item.get("item_name") or item.get("name", "Unknown Item")
+    
+    # Completely delete this specific item instance from the database
+    inventory_col.delete_one({"_id": item["_id"]})
+    
+    desc = (
+        f"{E_ADMIN} **Action:** Item Confiscation\n"
+        f"{E_CROWN} **Target User:** {member.mention}\n"
+        f"{E_ITEMBOX} **Item Removed:** {found_name}"
+    )
+    
+    embed = create_embed(f"{E_SUCCESS} Item Removed", desc, 0xe74c3c)
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="tradehistory", aliases=["th"], description="View a user's trade history.")
 async def tradehistory(ctx, user: discord.Member = None):
@@ -2234,6 +2468,7 @@ async def servertradehistory(ctx):
         
     view = Paginator(ctx, data, f"{E_STARS} Server Trade Logs", 0xf1c40f)
     await ctx.send(embed=view.get_embed(), view=view)
+    
 # ===========================
 #   GROUP 5: GIVEAWAYS
 # ===========================
@@ -2325,6 +2560,48 @@ async def giveaway_donor(ctx, prize: str, winners: int, duration: str, image: di
     image_url = image.url if image else None
     seconds = parse_duration(duration)
     await run_giveaway(ctx, prize, winners, seconds, "Donor Weighted!", required_role_ids=list(DONOR_WEIGHTS.keys()), weighted=True, image_url=image_url)
+
+@bot.hybrid_command(name="reroll", aliases=["gr", "giveawayreroll"], description="Admin: Reroll a giveaway winner.")
+@commands.has_permissions(administrator=True)
+async def reroll(ctx, message_id: str):
+    """Rerolls a giveaway in the current channel using the message ID."""
+    try:
+        msg = await ctx.channel.fetch_message(int(message_id))
+    except (discord.NotFound, ValueError):
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Message ID `{message_id}` not found in this channel.", 0xff0000), ephemeral=True)
+    
+    reaction = None
+    target_emoji = discord.PartialEmoji.from_str(E_GIVEAWAY) if E_GIVEAWAY.startswith("<") else "🎉"
+    
+    # Find the giveaway reaction
+    for r in msg.reactions:
+        if str(r.emoji) == str(target_emoji) or str(r.emoji) == "🎉":
+            reaction = r
+            break
+            
+    if not reaction:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} No valid giveaway reaction found on that message.", 0xff0000), ephemeral=True)
+        
+    # Fetch users who reacted, filtering out bots
+    users = [user async for user in reaction.users() if not user.bot]
+    
+    if not users:
+        return await ctx.send(embed=create_embed(f"{E_ALERT} Reroll Failed", "No valid entrants available to reroll.", 0x95a5a6))
+        
+    # Pick a new winner
+    new_winner = random.choice(users)
+    
+    # Build the premium announcement embed
+    desc = (
+        f"{E_CROWN} **New Winner:** {new_winner.mention}\n"
+        f"{E_ARROW} **Original Giveaway:** [Jump to Message]({msg.jump_url})"
+    )
+    
+    embed = create_embed(f"{E_GIVEAWAY} Giveaway Rerolled!", desc, 0x2ecc71)
+    if new_winner.avatar:
+        embed.set_thumbnail(url=new_winner.avatar.url)
+        
+    await ctx.send(content=f"Congratulations {new_winner.mention}!", embed=embed)
 
 # ===========================
 #   GROUP 6: NEW SHOP & INVENTORY
@@ -2493,44 +2770,41 @@ async def addpc(ctx, member: discord.Member, amount: int):
     wallets_col.update_one({"user_id": str(member.id)}, {"$inc": {"pc": amount}}, upsert=True)
     await ctx.send(embed=create_embed(f"{E_ADMIN} Grant", f"Added **{amount:,}** {E_PC} to {member.mention}.", 0xe67e22))
 
-@bot.hybrid_command(name="sellpokemon", aliases=["listitem"], description="List Pokemon on User Market.")
-async def sellpokemon(ctx, price: int):
-    await ctx.send(embed=create_embed(f"{E_PC} Listing", f"Please run `<@716390085896962058> info` now.\nPrice: {price:,} {E_PC} (Tax: 5%)", 0x3498db))
-    
-    def check(m): 
-        return m.channel == ctx.channel and m.author.id == 716390085896962058 and m.embeds
+@bot.hybrid_command(name="sellpokemon", aliases=["sp", "listitem"], description="List a Pokemon on the User Market.")
+@discord.app_commands.choices(category=[
+    discord.app_commands.Choice(name="Common", value="common"),
+    discord.app_commands.Choice(name="Rare", value="rare"),
+    discord.app_commands.Choice(name="Shiny", value="shiny"),
+    discord.app_commands.Choice(name="Regional", value="regional")
+])
+async def sellpokemon(ctx, name: str, level: int, iv: float, price: int, category: discord.app_commands.Choice[str], image: discord.Attachment = None):
+    # Security check for negative or zero prices
+    if price <= 0:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Price must be greater than 0.", 0xff0000), ephemeral=True)
 
-    try:
-        msg = await bot.wait_for('message', check=check, timeout=30)
-        embed = msg.embeds[0]
-        
-        # Scrape Info
-        desc = embed.description if embed.description else ""
-        title = embed.title if embed.title else "Unknown"
-        
-        # Simple extraction logic (can be refined based on Poketwo actual format)
-        level_match = re.search(r"Level\s*(\d+)", desc)
-        iv_match = re.search(r"IV\s*[:\s]+([\d\.]+)", desc)
-        
-        level = int(level_match.group(1)) if level_match else 0
-        iv = float(iv_match.group(1)) if iv_match else 0.0
-        
-        image_url = embed.thumbnail.url if embed.thumbnail else (embed.image.url if embed.image else None)
-        
-        item_id = f"U{get_next_id('shop_item_id')}"
-        shop_items_col.insert_one({
-            "id": item_id, "type": "pokemon", "name": title, "price": price, 
-            "currency": "pc", "seller_id": str(ctx.author.id), "image_url": image_url,
-            "stats": {"level": level, "iv": iv}, "sold": False, "tax_exempt": False, 
-            "category": "user_market", "timestamp": datetime.now()
-        })
-        
-        await ctx.send(embed=create_embed(f"{E_SUCCESS} Listed", f"**{title}** listed for **{price:,}** {E_PC}.\nID: {item_id}", 0x2ecc71, thumbnail=image_url))
-        
-    except asyncio.TimeoutError:
-        await ctx.send(embed=create_embed("Timeout", "Listing cancelled.", 0xff0000))
-    except Exception as e:
-        await ctx.send(embed=create_embed("Error", f"Could not parse info: {str(e)}", 0xff0000))
+    # Generate the unique U-ID sequence for user market items
+    item_id = f"U{get_next_id('user_shop_item_id')}"
+    img_url = image.url if image else None
+    
+    # Insert directly into the database
+    shop_items_col.insert_one({
+        "id": item_id, "type": "pokemon", "name": name, "price": price, 
+        "currency": "pc", "seller_id": str(ctx.author.id), "image_url": img_url,
+        "stats": {"level": level, "iv": iv}, "sold": False, "tax_exempt": False, 
+        "category": "user_market", "sub_category": category.value, "timestamp": datetime.now()
+    })
+    
+    # Premium Embed Output
+    desc = (
+        f"{E_PC} **Listed For:** {price:,} PC (5% Tax Applies)\n"
+        f"{E_ITEMBOX} **ID:** `{item_id}`\n"
+        f"{E_STAR} **Category:** {category.name}\n"
+        f"{E_BOOST} **Level:** {level} | **IV:** {iv}%"
+    )
+    
+    embed = create_embed(f"{E_SUCCESS} Pokémon Listed Successfully", desc, 0x2ecc71, thumbnail=img_url)
+    embed.set_footer(text="Your listing is now live on the User Market!")
+    await ctx.send(embed=embed)
 # bot.py Part 4 of 4 - Shop UI, Logic, Inventory & Startup
 # ... (Continued from Part 3)
 
@@ -2780,25 +3054,58 @@ async def marketsearch(ctx, search: str):
     view = Paginator(ctx, data, f"Search: {search}", 0x3498db)
     await ctx.send(embed=view.get_embed(), view=view)
 
-@bot.hybrid_command(name="pinfo", description="Inspect Admin Pokemon.")
+@bot.hybrid_command(name="itemsearch", aliases=["is"], description="Search Admin Shop items by name.")
+async def itemsearch(ctx, search: str):
+    items = list(shop_items_col.find({
+        "seller_id": "ADMIN", 
+        "sold": False, 
+        "name": {"$regex": search, "$options": "i"}
+    }))
+    
+    if not items: 
+        return await ctx.send(embed=create_embed("Empty", f"No items found matching '**{search}**'.", 0x95a5a6))
+        
+    data = []
+    for i in items:
+        stats = f" | Lvl {i['stats']['level']} - {i['stats']['iv']}%" if i.get("stats") else ""
+        cat = i.get("category", "Item").title()
+        emoji_curr = E_SHINY if i.get("currency") == "shiny" else E_PC
+        
+        data.append((f"{i['name']}{stats}", f"ID: **{i['id']}** | Type: **{cat}** | Price: **{i['price']:,}** {emoji_curr}"))
+        
+    view = Paginator(ctx, data, f"Admin Shop Search: {search}", 0xe74c3c)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.hybrid_command(name="pinfo", aliases=["pi"], description="Inspect any Pokemon in the Shop or User Market.")
 async def pinfo(ctx, item_id: str):
-    item = shop_items_col.find_one({"id": item_id, "type": "pokemon", "seller_id": "ADMIN"})
-    if not item: return await ctx.send(embed=create_embed("Not Found", "Invalid ID or not an Admin Pokemon.", 0xff0000))
+    # Removed the "seller_id": "ADMIN" filter so it finds ALL Pokemon by ID
+    item = shop_items_col.find_one({"id": item_id, "type": "pokemon"})
+    
+    if not item: 
+        return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} Invalid ID or not a Pokémon.", 0xff0000))
         
     stats = item.get("stats", {"level": 0, "iv": 0})
-    cat_raw = item.get("sub_category", "Unknown")
-    emoji_map = {"common": "🍀", "rare": "🌌", "shiny": "✨", "regional": "⛩️"}
+    cat_raw = item.get("sub_category", "Unknown").title()
+    
+    # Dynamically determine the seller name and currency emoji
+    is_admin = item.get("seller_id") == "ADMIN"
+    seller_display = "Admin Shop" if is_admin else f"<@{item['seller_id']}>"
+    currency_emoji = E_SHINY if item.get("currency") == "shiny" else E_PC
+    status = f"Sold {E_ERROR}" if item.get("sold") else f"Available {E_ACTIVE}"
     
     desc = (
         f"**Name:** {item['name']}\n"
-        f"**Category:** {cat_raw.title()} {emoji_map.get(cat_raw, '')}\n"
+        f"**Category:** {cat_raw}\n"
         f"**Level:** {stats['level']}\n"
         f"**IV:** {stats['iv']}%\n"
-        f"**Price:** {item['price']:,} {E_SHINY}\n"
-        f"**Status:** {'Sold 🔴' if item['sold'] else 'Available 🟢'}"
+        f"**Price:** {item['price']:,} {currency_emoji}\n"
+        f"**Seller:** {seller_display}\n"
+        f"**Status:** {status}"
     )
-    await ctx.send(embed=create_embed(f"{E_PC} Pokemon Inspection", desc, 0x3498db, thumbnail=item.get("image_url")))
-
+    
+    embed = create_embed(f"{E_ITEMBOX} Pokémon Inspection", desc, 0x3498db, thumbnail=item.get("image_url"))
+    await ctx.send(embed=embed)
+    
 @bot.hybrid_command(name="iteminfo", aliases=["ii", "pitem"], description="View details of a shop item.")
 async def iteminfo(ctx, *, query: str):
     # 1. Search Logic
@@ -3214,6 +3521,62 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.BadArgument): await ctx.send(embed=create_embed("Error", str(error), 0xff0000))
     else: print(error)
 
+@bot.listen('on_raw_reaction_add')
+async def auto_giveaway_quest(payload):
+    # Ignore bots
+    if payload.member.bot: return
+    
+    # 1. Check if the emoji used is the giveaway emoji or default popper
+    target_emoji_str = str(discord.PartialEmoji.from_str(E_GIVEAWAY)) if E_GIVEAWAY.startswith("<") else "🎉"
+    if str(payload.emoji) != target_emoji_str and str(payload.emoji) != "🎉":
+        return
+        
+    # 2. Fetch the channel and message
+    channel = bot.get_channel(payload.channel_id)
+    if not channel: return
+    try:
+        msg = await channel.fetch_message(payload.message_id)
+    except:
+        return
+        
+    if not msg.embeds: return
+    embed = msg.embeds[0]
+    
+    # 3. Verify it is an official bot giveaway by checking the footer
+    if embed.footer and embed.footer.text == "React with 🎉 to enter!":
+        uid = str(payload.user_id)
+        
+        # 4. Check the 24-Hour Cooldown
+        w = wallets_col.find_one({"user_id": uid})
+        if not w: 
+            w = get_wallet(payload.user_id) # Ensure they have a profile
+            
+        last_react = w.get("last_gw_react")
+        now = datetime.now()
+        
+        if last_react and isinstance(last_react, datetime):
+            # If less than 24 hours (86400 seconds) have passed, stop here.
+            if (now - last_react).total_seconds() < 86400:
+                return 
+                
+        # 5. Passed cooldown! Update the timestamp and credit the quest
+        wallets_col.update_one({"user_id": uid}, {"$set": {"last_gw_react": now}})
+        
+        # This will update Daily, Weekly, Monthly, Yearly, and Career giveaway quests!
+        await update_quest(payload.user_id, "giveaway", 1)
+        
+        # 6. Send the Premium DM
+        try:
+            desc = (
+                f"Your participation in **{embed.title}** has been verified!\n\n"
+                f"{E_GOLD_TICK} **+1 Giveaway Quest Progress** has been added to your profile.\n"
+                f"{E_TIMER} You can earn this automatic quest credit again in exactly 24 hours."
+            )
+            dm_embed = create_embed(f"{E_GIVEAWAY} Quest Completed!", desc, 0x2ecc71)
+            await payload.member.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass # Fails silently if the user has their DMs closed
+
 # ==============================================================================
 #  RENDER PORT BINDING (Fix for "No open ports detected")
 # ==============================================================================
@@ -3236,6 +3599,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
