@@ -430,7 +430,7 @@ def get_group_total_shares(group_name):
 #   GROUP 1: ECONOMY & PROFILE
 # ===========================
 
-@bot.hybrid_command(name="playerhistory", aliases=["ph"], description="Admin: View full user history.")
+@bot.command(name="playerhistory", aliases=["ph"], description="Admin: View full user history.")
 @commands.has_permissions(administrator=True)
 async def playerhistory(ctx, user: discord.Member):
     uid = str(user.id)
@@ -1196,7 +1196,7 @@ async def sellshares(ctx, club_name: str, buyer: discord.Member, percentage: int
         # ---------------------------
         await ctx.send(embed=create_embed(f"{E_SUCCESS} Sold", "Shares transferred.", 0x2ecc71))
 
-@bot.hybrid_command(name="marketlist", aliases=["ml"], description="View unsold clubs.")
+@bot.command(name="marketlist", aliases=["ml"], description="View unsold clubs.")
 async def marketlist(ctx):
     unsold_clubs = list(clubs_col.find({"$or": [{"owner_id": None}, {"owner_id": ""}]}).sort("value", -1))
     if not unsold_clubs: return await ctx.send(embed=create_embed(f"{E_AUCTION} Market Empty", "All clubs are currently owned.", 0x95a5a6))
@@ -1300,7 +1300,7 @@ def update_club_level(club_id, wins_gained=0):
             return name
     return None
 
-@bot.hybrid_command(name="listclubs", aliases=["lc"], description="List all registered clubs.")
+@bot.command(name="listclubs", aliases=["lc"], description="List all registered clubs.")
 async def listclubs(ctx):
     clubs = list(clubs_col.find().sort("value", -1))
     data = []
@@ -1349,7 +1349,7 @@ async def clublevel(ctx, *, club_name_or_id: str):
     else: embed.add_field(name="Status", value=f"{E_GOLD_TICK} Max Level")
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="leaderboard", aliases=["lb"], description="View top clubs.")
+@bot.command(name="leaderboard", aliases=["lb"], description="View top clubs.")
 async def leaderboard(ctx):
     clubs = list(clubs_col.find().sort([("total_wins", -1), ("value", -1)]))
     data = []
@@ -1749,7 +1749,7 @@ async def retireduelist(ctx, member: discord.Member = None):
     log_user_activity(target_id, "Duelist", "Retired")
     await ctx.send(embed=create_embed(f"{E_DANGER} Retired", f"Duelist **{d['username']}** retired.", 0xff0000))
 
-@bot.hybrid_command(name="listduelists", aliases=["ld"], description="List duelists.")
+@bot.command(name="listduelists", aliases=["ld"], description="List duelists.")
 async def listduelists(ctx):
     ds = list(duelists_col.find())
     data = []
@@ -1801,7 +1801,7 @@ async def deductsalary(ctx, duelist_id: int, confirm: str):
 #   GROUP 4: ADMIN
 # ===========================
 
-@bot.hybrid_command(name="forcemarket", description="Admin: Force market values to update now.")
+@bot.command(name="forcemarket", description="Admin: Force market values to update now.")
 @commands.has_permissions(administrator=True)
 async def forcemarket(ctx):
     await ctx.defer() # Don't timeout
@@ -2218,14 +2218,14 @@ async def forcewinner(ctx, item_type: str, item_id: int, winner_str: str, amount
     await finalize_auction(item_type, int(item_id), ctx.channel.id)
     await ctx.send(embed=create_embed(f"{E_ADMIN} Force Win", f"Forced winner **{winner_str}**.", 0xe67e22))
 
-@bot.hybrid_command(name="freezeauction", aliases=["fa"], description="Owner: Freeze auctions.")
+@bot.command(name="freezeauction", aliases=["fa"], description="Owner: Freeze auctions.")
 @commands.has_permissions(administrator=True)
 async def freezeauction(ctx):
     global bidding_frozen
     bidding_frozen = True
     await ctx.send(embed=create_embed(f"{E_DANGER} Frozen", "Auctions frozen.", 0xff0000))
 
-@bot.hybrid_command(name="unfreezeauction", aliases=["ufa"], description="Owner: Resume auctions.")
+@bot.command(name="unfreezeauction", aliases=["ufa"], description="Owner: Resume auctions.")
 @commands.has_permissions(administrator=True)
 async def unfreezeauction(ctx):
     global bidding_frozen
@@ -2450,7 +2450,7 @@ async def tradehistory(ctx, user: discord.Member = None):
     view = Paginator(ctx, data, f"{E_BOOK} Trade History: {target.display_name}", 0x3498db)
     await ctx.send(embed=view.get_embed(), view=view)
 
-@bot.hybrid_command(name="servertradehistory", aliases=["sth"], description="View global server trade logs.")
+@bot.command(name="servertradehistory", aliases=["sth"], description="View global server trade logs.")
 async def servertradehistory(ctx):
     trades = list(db.trade_history.find().sort("timestamp", -1).limit(15))
     
@@ -3039,7 +3039,7 @@ class ShopView(View):
         super().__init__(timeout=60)
         self.add_item(ShopSelect(ctx))
 
-@bot.hybrid_command(name="shop", description="Open Shop Menu.")
+@bot.command(name="shop", description="Open Shop Menu.")
 async def shop(ctx):
     await ctx.send(embed=create_embed(f"{E_ITEMBOX} Global Market", "Browse the Admin Shop or User Market below.", 0x2ecc71), view=ShopView(ctx))
 
@@ -3164,7 +3164,7 @@ async def iteminfo(ctx, *, query: str):
     
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="inventory", aliases=["inv"], description="View Items & Balance.")
+@bot.command(name="inventory", aliases=["inv"], description="View Items & Balance.")
 async def inventory(ctx):
     w = wallets_col.find_one({"user_id": str(ctx.author.id)})
     shiny = w.get("shiny_coins", 0) if w else 0
@@ -3402,7 +3402,7 @@ async def botinfo(ctx):
 # Define the ID here so it works standalone
 LOGIN_LOG_CHANNEL_ID = 1455496870003740736
 
-@bot.hybrid_command(name="remindlogin", description="Toggle daily login reminders.")
+@bot.command(name="remindlogin", description="Toggle daily login reminders.")
 async def remindlogin(ctx):
     uid = str(ctx.author.id)
     
@@ -3599,6 +3599,7 @@ if __name__ == "__main__":
     
     # 2. Start the Discord Bot
     bot.run(DISCORD_TOKEN)
+
 
 
 
