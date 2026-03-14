@@ -1214,12 +1214,29 @@ async def show_quest_menu(ctx, q_type):
         wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": updates}, upsert=True)
         quests_col.update_one({"user_id": str(ctx.author.id)}, {"$set": {f"{q_type}.claimed_bonus": True}})
         
-        desc += f"\n{E_GIVEAWAY} **BONUS UNLOCKED!**\n{bonus_text}"
+        desc += f"\n\n{E_GIVEAWAY} **BONUS UNLOCKED!**\n{bonus_text}"
     elif bonus_claimed:
-         desc += f"\n{E_GOLD_TICK} **Bonus Claimed:** {E_MONEY} ${cfg['bonus']:,}"
+         desc += f"\n\n{E_GOLD_TICK} **Bonus Claimed:** {E_MONEY} ${cfg['bonus']:,}"
     else:
-         desc += f"\n{E_CROWN} **Completion Bonus:** {E_MONEY} ${cfg['bonus']:,}"
+         desc += f"\n\n{E_CROWN} **Completion Bonus:** {E_MONEY} ${cfg['bonus']:,}"
 
+    # ---------------------------------------------------------
+    # THIS IS THE CRITICAL PART THAT LIKELY GOT DELETED:
+    # ---------------------------------------------------------
+    title_map = {
+        "daily": f"{E_STARS} Daily Quests",
+        "weekly": f"{E_BOOK} Weekly Quests",
+        "monthly": f"{E_CROWN} Monthly Quests",
+        "yearly": f"{E_GIVEAWAY} Yearly Quests",
+        "career": f"{E_ADMIN} Career Quests"
+    }
+    
+    embed = create_embed(title_map.get(q_type, "Quests"), desc, 0x3498db)
+    if ctx.author.avatar:
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+        
+    await ctx.send(embed=embed)
+    
 # Commands
 @bot.hybrid_command(name="dailyquest", aliases=["dq"], description="View Daily Quests.")
 async def dailyquest(ctx): await show_quest_menu(ctx, "daily")
