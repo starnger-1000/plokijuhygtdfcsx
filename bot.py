@@ -65,6 +65,48 @@ LEVEL_UP_CONFIG = [
     (741, "1st Position and League Winner", 1000000), (810, "UCL Winner", 1500000), (882, "Treble Winner", 2000000),
 ]
 
+# ==============================================================================
+#  CHAT LEVELING SYSTEM CONFIG & HELPER
+# ==============================================================================
+
+LEVEL_REWARDS = {
+    5: {"pc": 100000, "cash": 200000},
+    10: {"pc": 300000, "cash": 400000},
+    15: {"pc": 600000, "cash": 800000},
+    20: {"pc": 900000, "cash": 1200000},
+    25: {"pc": 1200000, "cash": 1500000},
+    30: {"pc": 1500000, "cash": 1800000},
+    40: {"pc": 2200000, "cash": 2000000},
+    50: {"pc": 3000000, "cash": 3000000},
+    60: {"pc": 4000000, "cash": 4000000},
+    70: {"pc": 5000000, "cash": 5000000},
+    80: {"pc": 6000000, "cash": 6000000},
+    90: {"pc": 7000000, "cash": 7000000},
+    100: {"pc": 8500000, "cash": 8000000},
+    120: {"pc": 10000000, "cash": 9000000},
+    150: {"pc": 15000000, "cash": 10000000},
+    180: {"pc": 20000000, "cash": 20000000},
+    200: {"pc": 30000000, "cash": 30000000}
+}
+
+def calc_level_data(total_msgs):
+    """Calculates Current Level, Progress, and Target based on total lifetime msgs."""
+    reqs = [50, 100, 200, 400, 800]
+    level = 0
+    msgs_left = total_msgs
+    
+    for r in reqs:
+        if msgs_left >= r:
+            level += 1
+            msgs_left -= r
+        else:
+            return level, msgs_left, r
+            
+    # From Level 5 onwards, it's a flat 1000 msgs per level
+    level += msgs_left // 1000
+    rem = msgs_left % 1000
+    return level, rem, 1000
+
 # Emojis
 E_PC = "<:pokecoins:1446019648901484616>"
 E_SHINY = "<a:poke_coin:1446005721370984470>"
@@ -194,6 +236,113 @@ class HumanInt(commands.Converter):
             if "b" in clean: return int(float(clean.replace("b", "")) * 1000000000)
             return int(clean)
         except: raise commands.BadArgument(f"Invalid number: {argument}")
+
+# ==============================================================================
+#  PC WITHDRAWAL SYSTEM
+# ==============================================================================
+
+PC_APPROVAL_CHANNEL_ID = 1455496870003740736
+PC_PING_ROLE_ID = 947137512814567444
+
+ROLE_REDUCTIONS_HOURS = {
+    973502021757968414: 168, # 7 days (Instant)
+    954242292129075220: 168, # Instant
+    962278336799858729: 168, # Instant
+    972809184242434048: 96,  # 4 days
+    972809183718150144: 60,  # 60 hours
+    972809183374225478: 48,  # 2 days
+    972809182224994354: 36,  # 36 hours
+    972809181444861984: 24,  # 1 day
+    972809180966703176: 0    # No reduction
+}
+
+class PCWithdrawModal(discord.ui.Modal, title="PC Withdrawal Request"):
+    amount_input = discord.ui.TextInput(label="Amount of PC to Withdraw", placeholder="e.g. 50000", style=discord.TextStyle.short, required=True)
+    market_id_input = discord.ui.TextInput(label="Market ID of Pokémon", placeholder="e.g. 12345678", style=discord.TextStyle.short, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(self.amount_input.value.replace(",", "").replace("k", "000").replace("m", "000000"))
+        except ValueError:
+            return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} Invalid amount entered.", 0xff0000), ephemeral=True)
+            
+        if amount <= 0:
+            return await interaction.response.send_message(embed=create_embed("Error", f"{E_ERROR} Amount must be greater than 0.", 0xff0000), ephemeral=True)
+
+        w = get_wallet(interaction.user.id)
+        if w.get("pc", 0) < amount:
+            return await interaction.response.send_message(embed=create_embed("Insufficient PC", f"{E_ERROR} You only have **{w.get('pc', 0):,}** {E_PC}.", 0xff0000), ephemeral=True)
+
+        # Calculate Timer
+        reduction_hours = 0
+        user_roles = [r.id for r in interaction.user.roles]
+        for role_id, hours in ROLE_REDUCTIONS_HOURS.items():
+            if role_id in user_roles:
+                reduction_hours = max(reduction_hours, hours)
+
+        base_wait_hours = 168 # 7 Days
+        final_wait_hours = max(0, base_wait_hours - reduction_hours)
+        
+        now = datetime.now()
+        unlocks_at = now + timedelta(hours=final_wait_hours)
+        
+        claim_id = f"c{get_next_id('pc_claim_id')}"
+        
+        # Save to DB
+        db.pc_claims.insert_one({
+            "id": claim_id,
+            "user_id": str(interaction.user.id),
+            "amount": amount,
+            "market_id": self.market_id_input.value,
+            "status": "PENDING",
+            "created_at": now,
+            "unlocks_at": unlocks_at,
+            "alert_sent": False
+        })
+        
+        desc = (
+            f"{E_GOLD_TICK} **Claim ID:** `{claim_id}`\n"
+            f"{E_PC} **Amount:** {amount:,}\n"
+            f"{E_ITEMBOX} **Market ID:** {self.market_id_input.value}\n\n"
+            f"{E_TIMER} **Approval Time:** <t:{int(unlocks_at.timestamp())}:R>"
+        )
+        await interaction.response.send_message(embed=create_embed(f"{E_SUCCESS} Withdrawal Submitted", desc, 0x2ecc71), ephemeral=True)
+
+class PCWithdrawView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        
+    @discord.ui.button(label="Fill Withdrawal Form", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_PC))
+    async def open_form(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PCWithdrawModal())
+
+async def pc_claim_alert_task():
+    """Background loop to alert admins when a user's PC claim timer ends."""
+    await bot.wait_until_ready()
+    channel = bot.get_channel(PC_APPROVAL_CHANNEL_ID)
+    
+    while not bot.is_closed():
+        if channel:
+            now = datetime.now()
+            # Find all pending claims where the timer has ended and no alert was sent
+            ready_claims = db.pc_claims.find({"status": "PENDING", "alert_sent": False, "unlocks_at": {"$lte": now}})
+            
+            for claim in ready_claims:
+                user = bot.get_user(int(claim['user_id']))
+                username = user.name if user else f"Unknown ({claim['user_id']})"
+                
+                desc = (
+                    f"{E_CROWN} **User:** <@{claim['user_id']}> ({username})\n"
+                    f"{E_PC} **Amount:** {claim['amount']:,}\n"
+                    f"{E_ITEMBOX} **Market ID:** {claim['market_id']}\n"
+                    f"{E_TIMER} **Requested:** <t:{int(claim['created_at'].timestamp())}:f>"
+                )
+                embed = create_embed(f"{E_ALERT} Claim Ready for Approval: {claim['id']}", desc, 0xf1c40f)
+                
+                await channel.send(content=f"<@&{PC_PING_ROLE_ID}>", embed=embed)
+                db.pc_claims.update_one({"_id": claim["_id"]}, {"$set": {"alert_sent": True}})
+                
+        await asyncio.sleep(60) # Check every 60 seconds
 
 class Paginator(View):
     def __init__(self, ctx, data, title, color, per_page=10):
@@ -410,13 +559,59 @@ async def on_message(message):
     # Check for Specific Chat Channel
     if db is not None and message.channel.id == LOG_CHANNELS["chat_channel"]:
         today_str = datetime.now().strftime("%Y-%m-%d")
-        message_counts_col.update_one(
+        
+        # Increment message count and return the updated document
+        ret = message_counts_col.find_one_and_update(
             {"user_id": str(message.author.id), "date": today_str},
             {"$inc": {"count": 1}},
-            upsert=True
+            upsert=True,
+            return_document=ReturnDocument.AFTER
         )
-    
+        
+        # Give a box every 150 messages
+        if ret and ret.get("count", 0) % 150 == 0:
+            wallets_col.update_one({"user_id": str(message.author.id)}, {"$inc": {"pc_boxes": 1}}, upsert=True)
+            try:
+                # Silently DM them so they know they earned it
+                desc = f"You just sent 150 messages today and earned **1x PC Box**!\nType `.ob` to open it."
+                await message.author.send(embed=create_embed(f"{E_ITEMBOX} Box Earned!", desc, 0x2ecc71))
+            except: 
+                pass
+        
         await update_quest(message.author.id, "msgs", 1)
+
+    # --- LEVEL UP SYSTEM START ---
+        # Track Lifetime Messages
+        w_ret = wallets_col.find_one_and_update(
+            {"user_id": str(message.author.id)},
+            {"$inc": {"lifetime_msgs": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        new_total = w_ret.get("lifetime_msgs", 1)
+        old_total = new_total - 1
+        
+        old_lvl, _, _ = calc_level_data(old_total)
+        new_lvl, _, _ = calc_level_data(new_total)
+        
+        if new_lvl > old_lvl:
+            # Level Up! Give Rewards
+            reward = LEVEL_REWARDS.get(new_lvl)
+            reward_txt = ""
+            if reward:
+                wallets_col.update_one(
+                    {"user_id": str(message.author.id)}, 
+                    {"$inc": {"pc": reward["pc"], "balance": reward["cash"]}}
+                )
+                reward_txt = f"\n\n{E_GIVEAWAY} **Rewards Unlocked:**\n{E_PC} **{reward['pc']:,} PC**\n{E_MONEY} **${reward['cash']:,} Cash**"
+            
+            # Send Premium DM
+            try:
+                desc = f"You reached **Level {new_lvl}** in the main chat!{reward_txt}"
+                await message.author.send(embed=create_embed(f"{E_STARS} Level Up!", desc, 0xf1c40f))
+            except: 
+                pass
+        # --- LEVEL UP SYSTEM END ---
         
     await bot.process_commands(message)
 
@@ -450,7 +645,7 @@ async def playerhistory(ctx, user: discord.Member):
     view = Paginator(ctx, data, f"{E_BOOK} History: {user.display_name}", 0x3498db, 10)
     await ctx.send(embed=view.get_embed(), view=view)
 
-@bot.hybrid_command(name="profile", aliases=["pr"], description="View profile stats and currencies.")
+@bot.hybrid_command(name="profile", aliases=["pr","p","i","I","P"], description="View profile stats and currencies.")
 async def profile(ctx, member: discord.Member = None):
     member = member or ctx.author
     uid = str(member.id)
@@ -474,7 +669,7 @@ async def profile(ctx, member: discord.Member = None):
         if c: embed.add_field(name="Owned Club", value=f"{c['name']} (100%)", inline=False)
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="wallet", aliases=["wl"], description="Check your balance.")
+@bot.hybrid_command(name="wallet", aliases=["wl","balance", "bal", "Bal"], description="Check your balance.")
 async def wallet(ctx):
     w = wallets_col.find_one({"user_id": str(ctx.author.id)})
     cash = w.get("balance", 0) if w else 0
@@ -482,6 +677,84 @@ async def wallet(ctx):
     shiny = w.get("shiny_coins", 0) if w else 0
     embed = create_embed(f"{E_MONEY} Wallet Balance", f"**User:** {ctx.author.mention}\n\n{E_MONEY} **Cash:** ${cash:,}\n{E_PC} **PC:** {pc:,}\n{E_SHINY} **Shiny Coins:** {shiny:,}", 0x2ecc71, thumbnail=ctx.author.avatar.url if ctx.author.avatar else None)
     await ctx.send(embed=embed)
+
+# ==============================================================================
+#  CHAT LEVELING COMMANDS
+# ==============================================================================
+
+@bot.command(name="lvlclaims", aliases=["leveluprewards", "lr"], description="View all chat Level Up rewards.")
+async def lvlclaims(ctx):
+    desc = f"{E_CHAT} Grind messages in the main chat to level up and earn these milestones!\n\n"
+    for lvl, rw in LEVEL_REWARDS.items():
+        desc += f"**Level {lvl}:** {rw['pc']:,} {E_PC} | ${rw['cash']:,} {E_MONEY}\n"
+        
+    embed = create_embed(f"{E_CROWN} Level Up Rewards", desc, 0x3498db)
+    await ctx.send(embed=embed)
+
+@bot.command(name="rank", aliases=["level", "lvl"], description="Check a user's chat rank and level.")
+async def rank(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    w = get_wallet(target.id)
+    total_msgs = w.get("lifetime_msgs", 0)
+    
+    level, current_prog, required = calc_level_data(total_msgs)
+    
+    # Progress Bar
+    pct = min(1.0, current_prog / required) if required > 0 else 0
+    bar_len = 10
+    fill = int(pct * bar_len)
+    bar = "🟦" * fill + "⬜" * (bar_len - fill)
+    
+    desc = (
+        f"{E_CROWN} **Current Level:** {level}\n"
+        f"{E_CHAT} **Total Messages:** {total_msgs:,}\n\n"
+        f"**Progress to Level {level + 1}:**\n"
+        f"{bar} `{current_prog:,} / {required:,}`"
+    )
+    
+    embed = create_embed(f"{E_STARS} Chat Rank: {target.display_name}", desc, 0xf1c40f)
+    if target.avatar:
+        embed.set_thumbnail(url=target.avatar.url)
+    await ctx.send(embed=embed)
+
+class LevelLBSelect(discord.ui.Select):
+    def __init__(self, ctx):
+        options = [
+            discord.SelectOption(label="Top 10", emoji="⭐", value="10"),
+            discord.SelectOption(label="Top 50", emoji="🌟", value="50"),
+            discord.SelectOption(label="Top 100", emoji="👑", value="100")
+        ]
+        super().__init__(placeholder="Select Leaderboard Size...", min_values=1, max_values=1, options=options)
+        self.ctx = ctx
+        
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id: return
+        
+        limit = int(self.values[0])
+        # Fetch top users sorted by lifetime_msgs
+        top_users = list(wallets_col.find({"lifetime_msgs": {"$gt": 0}}).sort("lifetime_msgs", -1).limit(limit))
+        
+        if not top_users:
+            return await interaction.response.send_message("No chat data found yet.", ephemeral=True)
+            
+        data = []
+        for i, u in enumerate(top_users):
+            lvl, _, _ = calc_level_data(u.get("lifetime_msgs", 0))
+            data.append((f"#{i+1} • <@{u['user_id']}>", f"{E_BOOST} Level: **{lvl}** | {E_CHAT} Msgs: **{u.get('lifetime_msgs', 0):,}**"))
+            
+        # Use existing paginator for smooth scrolling through 50 or 100 users
+        view = Paginator(self.ctx, data, f"{E_CROWN} Top {limit} Active Chatters", 0xf1c40f)
+        await interaction.response.edit_message(embed=view.get_embed(), view=view)
+
+class LevelLBView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=60)
+        self.add_item(LevelLBSelect(ctx))
+
+@bot.command(name="lvllb", aliases=["levelupleaderboard", "llb"], description="View the Chat Level leaderboard.")
+async def lvllb(ctx):
+    desc = f"Use the dropdown below to select the Leaderboard size.\n{E_CHAT} Start chatting to climb the ranks!"
+    await ctx.send(embed=create_embed(f"{E_STARS} Chat Leaderboard", desc, 0x3498db), view=LevelLBView(ctx))
 
 @bot.hybrid_command(name="buyshiny", aliases=["exchange", "bs"], description="Buy Shiny Coins ($100 Cash = 1 Shiny).")
 async def buyshiny(ctx, amount: int):
@@ -927,21 +1200,26 @@ async def show_quest_menu(ctx, q_type):
         
         if current >= target: tasks_completed += 1
 
-    # Bonus Reward Status
+   # Bonus Reward Status
     bonus_claimed = q_data.get("claimed_bonus", False)
     if tasks_completed >= total_tasks and not bonus_claimed:
         # Auto Claim Bonus
-        wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": cfg["bonus"]}})
+        updates = {"balance": cfg["bonus"]}
+        bonus_text = f"Sent: {E_MONEY} **${cfg['bonus']:,}**"
+        
+        # Add a PC Box ONLY if it is the daily quest
+        if q_type == "daily":
+            updates["pc_boxes"] = 1
+            bonus_text += f"\n{E_ITEMBOX} **Bonus Item:** 1x PC Box"
+            
+        wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": updates}, upsert=True)
         quests_col.update_one({"user_id": str(ctx.author.id)}, {"$set": {f"{q_type}.claimed_bonus": True}})
-        desc += f"\n{E_GIVEAWAY} **BONUS UNLOCKED!**\nSent: {E_MONEY} **${cfg['bonus']:,}**"
+        
+        desc += f"\n{E_GIVEAWAY} **BONUS UNLOCKED!**\n{bonus_text}"
     elif bonus_claimed:
          desc += f"\n{E_GOLD_TICK} **Bonus Claimed:** {E_MONEY} ${cfg['bonus']:,}"
     else:
          desc += f"\n{E_CROWN} **Completion Bonus:** {E_MONEY} ${cfg['bonus']:,}"
-
-    embed = create_embed(f"{E_BOOK} {q_type.title()} Quests", desc, 0x9b59b6)
-    if ctx.author.avatar: embed.set_thumbnail(url=ctx.author.avatar.url)
-    await ctx.send(embed=embed)
 
 # Commands
 @bot.hybrid_command(name="dailyquest", aliases=["dq"], description="View Daily Quests.")
@@ -2199,6 +2477,106 @@ async def logpayment(ctx, user: discord.Member, amount: HumanInt, *, reason: str
     await send_log("withdraw", embed)
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Logged", "Logged.", 0x2ecc71))
 
+@bot.command(name="getpc", aliases=["gpc"], description="Start a PC withdrawal process.")
+async def getpc(ctx):
+    desc = f"{E_PC} Click the button below to open the withdrawal form.\nEnsure you have enough PC in your balance before submitting!"
+    await ctx.send(embed=create_embed(f"{E_MONEY} Withdraw PC", desc, 0x3498db), view=PCWithdrawView())
+
+@bot.command(name="claimstatus", aliases=["cs"], description="Check the status and queue of your PC claim.")
+async def claimstatus(ctx):
+    claims = list(db.pc_claims.find({"user_id": str(ctx.author.id), "status": "PENDING"}).sort("created_at", 1))
+    if not claims:
+        return await ctx.send(embed=create_embed("No Active Claims", f"{E_ERROR} You have no pending PC withdrawals.", 0x95a5a6))
+        
+    embed = discord.Embed(title=f"{E_TIMER} Your Pending Claims", color=0x3498db)
+    for c in claims:
+        # Calculate Queue position (How many pending claims exist before this one)
+        queue_pos = db.pc_claims.count_documents({"status": "PENDING", "created_at": {"$lt": c["created_at"]}}) + 1
+        
+        status_text = "⏳ Waiting for Timer" if datetime.now() < c["unlocks_at"] else "✅ Ready for Admin Approval"
+        
+        embed.add_field(
+            name=f"Claim `{c['id']}`", 
+            value=f"{E_PC} **Amount:** {c['amount']:,}\n{E_ITEMBOX} **Queue Pos:** #{queue_pos}\n{E_TIMER} **Unlocks:** <t:{int(c['unlocks_at'].timestamp())}:R>\n**Status:** {status_text}", 
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command(name="claiminfo", aliases=["csinfo"], description="Admin: View details of a specific claim.")
+@commands.has_permissions(administrator=True)
+async def claiminfo(ctx, claim_id: str):
+    c = db.pc_claims.find_one({"id": claim_id.lower()})
+    if not c:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Claim `{claim_id}` not found.", 0xff0000))
+        
+    desc = (
+        f"{E_CROWN} **User:** <@{c['user_id']}>\n"
+        f"{E_PC} **Amount:** {c['amount']:,}\n"
+        f"{E_ITEMBOX} **Market ID:** {c['market_id']}\n"
+        f"{E_ADMIN} **Status:** {c['status']}\n\n"
+        f"{E_TIMER} **Created:** <t:{int(c['created_at'].timestamp())}:f>\n"
+        f"{E_TIMER} **Unlocks At:** <t:{int(c['unlocks_at'].timestamp())}:f>"
+    )
+    await ctx.send(embed=create_embed(f"{E_BOOK} Claim Info: {c['id']}", desc, 0x9b59b6))
+
+@bot.command(name="claimapproved", aliases=["ca"], description="Admin: Approve a PC withdrawal claim.")
+@commands.has_permissions(administrator=True)
+async def claimapproved(ctx, claim_id: str):
+    c = db.pc_claims.find_one({"id": claim_id.lower()})
+    if not c or c['status'] != "PENDING":
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Claim `{claim_id}` not found or already processed.", 0xff0000))
+        
+    # Check if user still has the funds
+    w = get_wallet(c['user_id'])
+    if w.get("pc", 0) < c['amount']:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} User no longer has enough PC. Use `.cr` to reject.", 0xff0000))
+        
+    # Deduct PC and update DB
+    wallets_col.update_one({"user_id": c['user_id']}, {"$inc": {"pc": -c['amount']}})
+    db.pc_claims.update_one({"_id": c["_id"]}, {"$set": {"status": "APPROVED", "processed_at": datetime.now()}})
+    
+    # Send Premium DM to user
+    try:
+        user = await bot.fetch_user(int(c['user_id']))
+        dm_desc = f"Your PC withdrawal request for **{c['amount']:,}** {E_PC} (Market ID: `{c['market_id']}`) has been officially processed and approved by the administration!"
+        await user.send(embed=create_embed(f"{E_SUCCESS} Claim Approved", dm_desc, 0x2ecc71))
+    except: pass
+    
+    # Auto-Log to Withdraw Channel
+    log_ch = bot.get_channel(LOG_CHANNELS["withdraw"])
+    if log_ch:
+        time_taken = str(datetime.now() - c['created_at']).split('.')[0] # Formats cleanly
+        log_desc = (
+            f"**Claim ID:** `{c['id']}`\n"
+            f"**User:** <@{c['user_id']}>\n"
+            f"**Admin:** {ctx.author.mention}\n"
+            f"**Amount:** {c['amount']:,} {E_PC}\n"
+            f"**Market ID:** {c['market_id']}\n"
+            f"**Requested On:** <t:{int(c['created_at'].timestamp())}:f>\n"
+            f"**Processing Time:** {time_taken}"
+        )
+        await log_ch.send(embed=create_embed(f"{E_MONEY} Withdrawal Approved", log_desc, 0x2ecc71))
+        
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Claim Approved", f"Claim `{c['id']}` has been finalized and PC has been deducted.", 0x2ecc71))
+
+@bot.command(name="claimrejected", aliases=["cr"], description="Admin: Reject a PC withdrawal claim.")
+@commands.has_permissions(administrator=True)
+async def claimrejected(ctx, claim_id: str, *, reason: str = "No reason provided."):
+    c = db.pc_claims.find_one({"id": claim_id.lower()})
+    if not c or c['status'] != "PENDING":
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Claim `{claim_id}` not found or already processed.", 0xff0000))
+        
+    db.pc_claims.update_one({"_id": c["_id"]}, {"$set": {"status": "REJECTED", "processed_at": datetime.now()}})
+    
+    # Send Premium DM to user
+    try:
+        user = await bot.fetch_user(int(c['user_id']))
+        dm_desc = f"Your PC withdrawal request for **{c['amount']:,}** {E_PC} (Market ID: `{c['market_id']}`) has been rejected.\n\n**Reason:** {reason}"
+        await user.send(embed=create_embed(f"{E_DANGER} Claim Rejected", dm_desc, 0xff0000))
+    except: pass
+        
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Claim Rejected", f"Claim `{c['id']}` has been rejected.", 0xff0000))
+
 @bot.hybrid_command(name="admin_reset_all", description="Owner: Reset EVERYTHING.")
 @commands.has_permissions(administrator=True)
 async def admin_reset_all(ctx):
@@ -3183,6 +3561,54 @@ async def inventory(ctx):
     first_embed.description = desc
     await ctx.send(embed=first_embed, view=view)
 
+@bot.command(name="boxes", description="Check your PC Box inventory.")
+async def boxes(ctx):
+    w = get_wallet(ctx.author.id)
+    box_count = w.get("pc_boxes", 0)
+    
+    desc = (
+        f"You currently have **{box_count:,}** {E_ITEMBOX} **PC Boxes**.\n\n"
+        f"Use `.openbox <amount>` to open them and earn {E_PC} Pokécoins!"
+    )
+    
+    embed = create_embed(f"{E_ITEMBOX} Your PC Boxes", desc, 0x3498db)
+    if ctx.author.avatar:
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+        
+    await ctx.send(embed=embed)
+
+@bot.command(name="openbox", aliases=["ob"], description="Open your PC Boxes.")
+async def openbox(ctx, amount: int = 1):
+    if amount <= 0:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You must open at least 1 box.", 0xff0000), ephemeral=True)
+        
+    w = get_wallet(ctx.author.id)
+    box_count = w.get("pc_boxes", 0)
+    
+    if box_count < amount:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You only have **{box_count:,}** PC Boxes.", 0xff0000), ephemeral=True)
+        
+    # Calculate random rewards (30k to 150k per box)
+    total_pc = sum(random.randint(30000, 150000) for _ in range(amount))
+    
+    # Update Database (Deduct boxes, Add PC)
+    wallets_col.update_one(
+        {"user_id": str(ctx.author.id)},
+        {"$inc": {"pc_boxes": -amount, "pc": total_pc}}
+    )
+    
+    desc = (
+        f"{E_SUCCESS} Successfully opened **{amount:,}** PC Box(es)!\n\n"
+        f"{E_PC} **Reward:** {total_pc:,} Pokécoins\n"
+        f"{E_ITEMBOX} **Remaining Boxes:** {box_count - amount:,}"
+    )
+    
+    embed = create_embed(f"{E_GIVEAWAY} Boxes Opened!", desc, 0x2ecc71)
+    if ctx.author.avatar:
+        embed.set_thumbnail(url=ctx.author.avatar.url)
+        
+    await ctx.send(embed=embed)
+
 # ===========================
 #   REWARDS & CODES SYSTEM
 # ===========================
@@ -3364,7 +3790,7 @@ class HelpView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(HelpSelect())
 
-@bot.hybrid_command(name="botinfo", aliases=["info", "guide"], description="Open help panel.")
+@bot.hybrid_command(name="botinfo", aliases=["info", "guide", "help"], description="Open help panel.")
 async def botinfo(ctx):
     desc = (
         f"**Welcome to Ze Bot v5.8!**\n"
@@ -3496,6 +3922,8 @@ async def on_ready():
         bot.add_view(GiveawayView()) 
         bot.add_view(ShopView())
         bot.add_view(BotInfoView())
+        
+        bot.loop.create_task(pc_claim_alert_task())
         
         # 2. Start Market Simulation (If not running)
         if not hasattr(bot, 'market_task_started'):
