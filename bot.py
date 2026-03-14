@@ -555,12 +555,15 @@ async def check_active_giveaways():
 
 @bot.event
 async def on_message(message):
-    if message.author.bot: return
-    # Check for Specific Chat Channel
+    # 1. Ignore bots
+    if message.author.bot: 
+        return
+        
+    # 2. Crash-proof channel check using .get()
     if db is not None and message.channel.id == LOG_CHANNELS.get("chat_channel"):
         today_str = datetime.now().strftime("%Y-%m-%d")
         
-        # Increment message count and return the updated document
+        # --- PC BOX SYSTEM ---
         ret = message_counts_col.find_one_and_update(
             {"user_id": str(message.author.id), "date": today_str},
             {"$inc": {"count": 1}},
@@ -568,20 +571,17 @@ async def on_message(message):
             return_document=ReturnDocument.AFTER
         )
         
-        # Give a box every 150 messages
         if ret and ret.get("count", 0) % 150 == 0:
             wallets_col.update_one({"user_id": str(message.author.id)}, {"$inc": {"pc_boxes": 1}}, upsert=True)
             try:
-                # Silently DM them so they know they earned it
                 desc = f"You just sent 150 messages today and earned **1x PC Box**!\nType `.ob` to open it."
                 await message.author.send(embed=create_embed(f"{E_ITEMBOX} Box Earned!", desc, 0x2ecc71))
             except: 
                 pass
         
         await update_quest(message.author.id, "msgs", 1)
-
-    # --- LEVEL UP SYSTEM START ---
-        # Track Lifetime Messages
+        
+        # --- LEVEL UP SYSTEM ---
         w_ret = wallets_col.find_one_and_update(
             {"user_id": str(message.author.id)},
             {"$inc": {"lifetime_msgs": 1}},
@@ -595,7 +595,6 @@ async def on_message(message):
         new_lvl, _, _ = calc_level_data(new_total)
         
         if new_lvl > old_lvl:
-            # Level Up! Give Rewards
             reward = LEVEL_REWARDS.get(new_lvl)
             reward_txt = ""
             if reward:
@@ -605,14 +604,14 @@ async def on_message(message):
                 )
                 reward_txt = f"\n\n{E_GIVEAWAY} **Rewards Unlocked:**\n{E_PC} **{reward['pc']:,} PC**\n{E_MONEY} **${reward['cash']:,} Cash**"
             
-            # Send Premium DM
             try:
                 desc = f"You reached **Level {new_lvl}** in the main chat!{reward_txt}"
                 await message.author.send(embed=create_embed(f"{E_STARS} Level Up!", desc, 0xf1c40f))
             except: 
                 pass
-        # --- LEVEL UP SYSTEM END ---
-        
+
+    # 3. CRITICAL: This line tells the bot to actually read your commands!
+    # Notice how it is outdented all the way to the left so it runs no matter what.
     await bot.process_commands(message)
 
 def get_group_total_shares(group_name):
