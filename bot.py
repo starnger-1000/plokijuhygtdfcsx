@@ -2593,6 +2593,56 @@ async def claimrejected(ctx, claim_id: str, *, reason: str = "No reason provided
         
     await ctx.send(embed=create_embed(f"{E_SUCCESS} Claim Rejected", f"Claim `{c['id']}` has been rejected.", 0xff0000))
 
+@bot.command(name="pendingclaims", aliases=["pendingpc", "pclist"], description="Admin: View all pending PC withdrawal claims.")
+@commands.has_permissions(administrator=True)
+async def pendingclaims(ctx):
+    # Fetch all pending claims, sorting the oldest ones to the top of the queue
+    claims = list(db.pc_claims.find({"status": "PENDING"}).sort("created_at", 1))
+    
+    if not claims:
+        return await ctx.send(embed=create_embed("Queue Clear!", f"{E_SUCCESS} There are currently no pending PC claims.", 0x2ecc71))
+        
+    data = []
+    for i, c in enumerate(claims):
+        # Determine if the timer is still ticking or if it's ready for approval
+        status_text = "⏳ Waiting" if datetime.now() < c["unlocks_at"] else "✅ READY"
+        
+        title = f"#{i+1} | Claim ID: {c['id']}"
+        desc = (
+            f"{E_CROWN} **User:** <@{c['user_id']}>\n"
+            f"{E_PC} **Amount:** {c['amount']:,}\n"
+            f"{E_ITEMBOX} **Market ID:** `{c['market_id']}`\n"
+            f"{E_TIMER} **Unlocks:** <t:{int(c['unlocks_at'].timestamp())}:R> ({status_text})"
+        )
+        data.append((title, desc))
+        
+    view = Paginator(ctx, data, f"{E_ADMIN} Pending PC Claims Queue", 0xf1c40f)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+
+@bot.command(name="claimhistory", aliases=["chistory"], description="Admin: View recently processed PC claims.")
+@commands.has_permissions(administrator=True)
+async def claimhistory(ctx):
+    # Fetch the 30 most recently processed (approved/rejected) claims
+    claims = list(db.pc_claims.find({"status": {"$ne": "PENDING"}}).sort("processed_at", -1).limit(30))
+    
+    if not claims:
+        return await ctx.send(embed=create_embed("Empty History", f"{E_ERROR} No processed claims found in the database.", 0x95a5a6))
+        
+    data = []
+    for c in claims:
+        icon = E_SUCCESS if c['status'] == "APPROVED" else E_DANGER
+        title = f"Claim ID: {c['id']} | {c['status']}"
+        desc = (
+            f"{icon} **User:** <@{c['user_id']}>\n"
+            f"{E_PC} **Amount:** {c['amount']:,}\n"
+            f"{E_TIMER} **Processed:** <t:{int(c.get('processed_at', c['created_at']).timestamp())}:d>"
+        )
+        data.append((title, desc))
+        
+    view = Paginator(ctx, data, f"{E_BOOK} Recent PC Claims History", 0x3498db)
+    await ctx.send(embed=view.get_embed(), view=view)
+
 @bot.hybrid_command(name="admin_reset_all", description="Owner: Reset EVERYTHING.")
 @commands.has_permissions(administrator=True)
 async def admin_reset_all(ctx):
