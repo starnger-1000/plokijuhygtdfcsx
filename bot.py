@@ -557,7 +557,7 @@ async def check_active_giveaways():
 async def on_message(message):
     if message.author.bot: return
     # Check for Specific Chat Channel
-    if db is not None and message.channel.id == LOG_CHANNELS["chat_channel"]:
+    if db is not None and message.channel.id == LOG_CHANNELS.get("chat_channel"):
         today_str = datetime.now().strftime("%Y-%m-%d")
         
         # Increment message count and return the updated document
