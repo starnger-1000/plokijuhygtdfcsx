@@ -2444,6 +2444,44 @@ async def massaddpc(ctx, amount: int, members: commands.Greedy[discord.Member]):
     desc = f"{E_SUCCESS} Added {E_PC} **{amount:,}** to **{len(members)}** users.\n\n**Users:** {get_user_list_string(members)}"
     await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Add PC", desc, 0x2ecc71))
 
+@bot.command(name="massbox", aliases=["mbox"], description="Admin: Give PC Boxes to multiple users.")
+@commands.has_permissions(administrator=True)
+async def massbox(ctx, amount: int, members: commands.Greedy[discord.Member]):
+    # 1. Error Catching
+    if amount <= 0:
+        return await ctx.send(embed=create_embed("Invalid Amount", f"{E_ERROR} You must give at least 1 PC Box.", 0xff0000), ephemeral=True)
+    if not members:
+        return await ctx.send(embed=create_embed("No Users Mentioned", f"{E_ERROR} You must mention at least one user.\n**Usage:** `.mbox <amount> @user1 @user2`", 0xff0000), ephemeral=True)
+
+    success_count = 0
+    
+    # 2. Process Each Mentioned User
+    for member in members:
+        if member.bot: continue # Skip bots
+        
+        # Add the box(es) to their database profile
+        wallets_col.update_one(
+            {"user_id": str(member.id)},
+            {"$inc": {"pc_boxes": amount}},
+            upsert=True
+        )
+        success_count += 1
+        
+        # 3. Send the Premium DM
+        try:
+            dm_desc = (
+                f"You have been awarded **{amount:,}x** {E_ITEMBOX} **PC Box(es)** by the Administration!\n\n"
+                f"Type `.ob` or `/openbox` in the server to crack them open and claim your PC."
+            )
+            embed = create_embed(f"{E_GIVEAWAY} Special Reward!", dm_desc, 0x2ecc71)
+            await member.send(embed=embed)
+        except:
+            pass # Ignore if the user has their DMs locked
+            
+    # 4. Send the Admin Confirmation in Chat
+    desc = f"{E_SUCCESS} Successfully added **{amount:,}** {E_ITEMBOX} PC Box(es) to **{success_count}** user(s)!"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Box Transfer", desc, 0x3498db))
+
 @bot.hybrid_command(name="massaddsc", aliases=["masc"], description="Admin: Add Shiny Coins to multiple users.")
 @commands.has_permissions(administrator=True)
 async def massaddsc(ctx, amount: int, members: commands.Greedy[discord.Member]):
