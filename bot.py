@@ -893,9 +893,9 @@ def get_duelist(identifier):
     """Fetches a duelist by Discord ID mention, or Duelist ID."""
     if identifier.startswith("<@") and identifier.endswith(">"):
         user_id = identifier.replace("<@", "").replace("!", "").replace(">", "")
-        return db.duelists.find_one({"user_id": user_id})
+        return duelists_col.find_one({"user_id": user_id})
     else:
-        return db.duelists.find_one({"duelist_id": identifier.upper()})
+        return duelists_col.find_one({"duelist_id": identifier.upper()})
 
 @bot.event
 async def on_member_remove(member):
@@ -2386,90 +2386,146 @@ async def trade_cancel(ctx):
 
 @bot.hybrid_command(name="registerduelist", aliases=["rd"], description="Register as duelist.")
 async def registerduelist(ctx, username: str, base_price: HumanInt, salary: HumanInt):
-    if duelists_col.find_one({"discord_user_id": str(ctx.author.id)}): return await ctx.send(embed=create_embed("Error", "Already registered.", 0xff0000))
+    # Check both old and new ID formats to prevent double-registration
+    if duelists_col.find_one({"discord_user_id": str(ctx.author.id)}) or duelists_col.find_one({"user_id": str(ctx.author.id)}): 
+        return await ctx.send(embed=create_embed("Error", "Already registered.", 0xff0000))
+        
     did = get_next_id("duelist_id")
     avatar = ctx.author.avatar.url if ctx.author.avatar else ""
-    duelists_col.insert_one({"id": did, "discord_user_id": str(ctx.author.id), "username": username, "base_price": base_price, "expected_salary": salary, "avatar_url": avatar, "owned_by": None, "club_id": None})
+    
+    # THE UPGRADED DATABASE ENTRY
+    duelists_col.insert_one({
+        "id": did, # Kept for legacy commands
+        "duelist_id": f"D{did}", # New ID format for esports (e.g. D15)
+        "discord_user_id": str(ctx.author.id), # Kept for legacy commands
+        "user_id": str(ctx.author.id), # New ID format for esports
+        "username": username,
+        "base_price": base_price,
+        "expected_salary": salary,
+        "market_worth": base_price, # NEW: Starting market worth
+        "status": "Free Agent", # NEW: Starting status
+        "transfer_listed": False, # NEW: Market status
+        "wins": 0, "losses": 0, "draws": 0, "matches": 0, "mvps": 0, # NEW: Match Stats
+        "avatar_url": avatar, 
+        "owned_by": None, 
+        "club_id": None
+    })
+    
     # 👇 QUEST HOOK ADDED HERE 👇
     try: await update_quest(ctx.author.id, "duelist_club", 1)
     except: pass
     # ---------------------------
-    await ctx.send(embed=create_embed(f"{E_SUCCESS} Registered", f"Duelist **{username}** (ID: {did})", 0x9b59b6))
+    
+    await ctx.send(embed=create_embed(f"{E_SUCCESS} Registered", f"Duelist **{username}** (ID: D{did}) successfully registered to the Esports Engine!", 0x9b59b6))
 
 @bot.hybrid_command(name="retireduelist", aliases=["ret"], description="Retire a duelist.")
 async def retireduelist(ctx, member: discord.Member = None):
     target_id = str(member.id) if member else str(ctx.author.id)
-    d = duelists_col.find_one({"discord_user_id": target_id})
+    d = duelists_col.find_one({"user_id": target_id}) # Upgraded to user_id
     if not d: return await ctx.send(embed=create_embed("Error", "Not a duelist.", 0xff0000))
+    
     if member:
         if not d.get("club_id"): return await ctx.send(embed=create_embed("Error", "Free agent must self-retire.", 0xff0000))
         c = clubs_col.find_one({"id": d["club_id"]})
         owner_str, owner_ids = get_club_owner_info(c["id"])
         if str(ctx.author.id) not in owner_ids: return await ctx.send(embed=create_embed("Error", "Not owner.", 0xff0000))
+        
         await ctx.send(embed=create_embed(f"{E_ALERT} Confirm", f"Owner {ctx.author.mention}, retire {member.mention}? `yes`/`no`", 0xe67e22))
         try: msg = await bot.wait_for('message', check=lambda m: m.author==ctx.author and m.content.lower() in ['yes','no'], timeout=30)
         except: return
         if msg.content.lower() == 'no': return
+        
         await ctx.send(embed=create_embed(f"{E_ALERT} Confirm", f"Duelist {member.mention}, confirm retirement? `yes`/`no`", 0xe67e22))
         try: msg2 = await bot.wait_for('message', check=lambda m: m.author==member and m.content.lower() in ['yes','no'], timeout=30)
         except: return
         if msg2.content.lower() == 'no': return
     else:
-        if d.get("owned_by"): return await ctx.send(embed=create_embed("Error", "You are signed. Ask owner.", 0xff0000))
+        if d.get("club_id"): return await ctx.send(embed=create_embed("Error", "You are signed. Ask owner.", 0xff0000))
+
+    # --- NEW CLEANUP LOGIC ---
+    # Erase any ghost contracts or transfer market listings
+    if db is not None:
+        db.contracts.delete_many({"duelist_id": d["_id"]})
+        db.pending_contracts.delete_many({"duelist_id": d["_id"]})
+        db.pending_transfers.delete_many({"duelist_id": d["_id"]})
+    # -------------------------
+
     duelists_col.delete_one({"_id": d["_id"]})
-    embed_log = create_embed(f"{E_DANGER} Duelist Retired", f"**Player:** {d['username']}\n**ID:** {d['id']}", 0xff0000)
+    
+    embed_log = create_embed(f"{E_DANGER} Duelist Retired", f"**Player:** {d['username']}\n**ID:** {d.get('duelist_id')}", 0xff0000)
     await send_log("duelist", embed_log)
     log_user_activity(target_id, "Duelist", "Retired")
     await ctx.send(embed=create_embed(f"{E_DANGER} Retired", f"Duelist **{d['username']}** retired.", 0xff0000))
-
-@bot.command(name="listduelists", aliases=["ld"], description="List duelists.")
+    
+@bot.hybrid_command(name="listduelists", aliases=["ld"], description="List all registered duelists and their market value.")
 async def listduelists(ctx):
-    ds = list(duelists_col.find())
+    ds = list(duelists_col.find({"status": {"$ne": "Left the Server"}})) # Hides people who left
+    if not ds: return await ctx.send(embed=create_embed("Empty", f"{E_ERROR} No duelists registered yet.", 0xff0000))
+        
     data = []
     for d in ds:
         cname = "Free Agent"
         if d.get("club_id"):
-            c = clubs_col.find_one({"id": d["club_id"]})
+            c = clubs_col.find_one({"id": d["club_id"]}) or clubs_col.find_one({"_id": d["club_id"]})
             if c: cname = c["name"]
-        data.append((f"{d['username']}", f"{E_ITEMBOX} ID: {d['id']}\n{E_MONEY} ${d['expected_salary']:,}\n{E_STAR} {cname}"))
-    view = Paginator(ctx, data, f"{E_BOOK} Duelist Registry", 0x9b59b6, 10)
+            
+        # Fetching the sleek new esports values
+        duelist_id = d.get('duelist_id', f"D{d.get('id', 'N/A')}")
+        worth = d.get('market_worth', d.get('base_price', 0))
+        status = d.get('status', 'Free Agent')
+        
+        desc = (
+            f"{E_ITEMBOX} **ID:** `{duelist_id}`\n"
+            f"{E_MONEY} **Value:** ${worth:,}\n"
+            f"{E_STAR} **Club:** {cname}\n"
+            f"{E_ADMIN} **Status:** {status}"
+        )
+        
+        data.append((f"{d.get('username', 'Unknown')}", desc))
+        
+    view = Paginator(ctx, data, f"{E_BOOK} Global Duelist Registry", 0x9b59b6, 10)
     await ctx.send(embed=view.get_embed(), view=view)
-
+    
 @bot.hybrid_command(name="adjustsalary", aliases=["as"], description="Owner: Bonus/Fine.")
-async def adjustsalary(ctx, duelist_id: int, amount: HumanInt):
-    d = duelists_col.find_one({"id": int(duelist_id)})
+async def adjustsalary(ctx, duelist_identifier: str, amount: HumanInt): # Upgraded to identifier
+    d = get_duelist(duelist_identifier)
     if not d or not d.get("club_id"): return await ctx.send(embed=create_embed("Error", "Duelist not found/signed.", 0xff0000))
+    
     c = clubs_col.find_one({"id": d["club_id"]})
     owner_str, owner_ids = get_club_owner_info(c["id"])
     if str(ctx.author.id) not in owner_ids: return await ctx.send(embed=create_embed("Error", "Not owner.", 0xff0000))
+    
     if amount > 0:
         w = wallets_col.find_one({"user_id": str(ctx.author.id)})
         if not w or w.get("balance", 0) < amount: return await ctx.send(embed=create_embed("Error", "Insufficient funds.", 0xff0000))
+        
         wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": -amount}})
-        wallets_col.update_one({"user_id": d["discord_user_id"]}, {"$inc": {"balance": amount}}, upsert=True)
+        wallets_col.update_one({"user_id": d["user_id"]}, {"$inc": {"balance": amount}}, upsert=True)
         log_user_activity(ctx.author.id, "Transaction", f"Paid bonus ${amount:,} to {d['username']}")
         await ctx.send(embed=create_embed(f"{E_MONEY} Bonus", f"Paid **${amount:,}** to {d['username']}.", 0x2ecc71))
     else:
         abs_amt = abs(amount)
-        wallets_col.update_one({"user_id": d["discord_user_id"]}, {"$inc": {"balance": -abs_amt}}, upsert=True)
+        wallets_col.update_one({"user_id": d["user_id"]}, {"$inc": {"balance": -abs_amt}}, upsert=True)
         wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": abs_amt}}, upsert=True)
         log_user_activity(ctx.author.id, "Transaction", f"Fined {d['username']} ${abs_amt:,}")
         await ctx.send(embed=create_embed(f"{E_DANGER} Fine", f"Deducted **${abs_amt:,}** from {d['username']}.", 0xff0000))
 
 @bot.hybrid_command(name="deductsalary", aliases=["ds"], description="Owner: Deduct salary.")
-async def deductsalary(ctx, duelist_id: int, confirm: str):
+async def deductsalary(ctx, duelist_identifier: str, confirm: str): # Upgraded to identifier
     if confirm.lower() != "yes": return
-    d = duelists_col.find_one({"id": int(duelist_id)})
+    d = get_duelist(duelist_identifier)
     if not d: return await ctx.send(embed=create_embed("Error", "Duelist not found.", 0xff0000))
     if not d.get('club_id'): return await ctx.send(embed=create_embed("Error", "Duelist not in a club.", 0xff0000))
+    
     owner_str, owner_ids = get_club_owner_info(d['club_id'])
     if str(ctx.author.id) not in owner_ids and not ctx.author.guild_permissions.administrator: return await ctx.send(embed=create_embed("Error", "Not authorized.", 0xff0000))
+    
     penalty = int(d["expected_salary"] * (DUELIST_MISS_PENALTY_PERCENT / 100))
-    wallets_col.update_one({"user_id": d["discord_user_id"]}, {"$inc": {"balance": -penalty}}, upsert=True)
+    wallets_col.update_one({"user_id": d["user_id"]}, {"$inc": {"balance": -penalty}}, upsert=True)
     wallets_col.update_one({"user_id": str(ctx.author.id)}, {"$inc": {"balance": penalty}}, upsert=True)
-    log_user_activity(d["discord_user_id"], "Penalty", f"Fined ${penalty:,} for missed match.")
+    log_user_activity(d["user_id"], "Penalty", f"Fined ${penalty:,} for missed match.")
     await ctx.send(embed=create_embed(f"{E_ALERT} Penalty", f"Fined **${penalty:,}** from **{d['username']}**'s wallet.", 0xff0000))
-
+    
 # ==============================================================================
 #  CLUB TAX COMMANDS
 # ==============================================================================
@@ -3510,6 +3566,32 @@ async def servertradehistory(ctx):
         
     view = Paginator(ctx, data, f"{E_STARS} Server Trade Logs", 0xf1c40f)
     await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.hybrid_command(name="syncduelists", description="Admin: Upgrade old duelists to the new esports engine.")
+@commands.has_permissions(administrator=True)
+async def syncduelists(ctx):
+    old_duelists = duelists_col.find({})
+    count = 0
+    
+    for d in old_duelists:
+        updates = {}
+        # Inject the missing esports keys if they don't have them
+        if "user_id" not in d: updates["user_id"] = d.get("discord_user_id")
+        if "duelist_id" not in d: updates["duelist_id"] = f"D{d.get('id')}"
+        if "market_worth" not in d: updates["market_worth"] = d.get("base_price", 100000)
+        if "status" not in d: updates["status"] = "Signed" if d.get("club_id") else "Free Agent"
+        if "transfer_listed" not in d: updates["transfer_listed"] = False
+        if "wins" not in d: updates["wins"] = 0
+        if "losses" not in d: updates["losses"] = 0
+        if "draws" not in d: updates["draws"] = 0
+        if "matches" not in d: updates["matches"] = 0
+        if "mvps" not in d: updates["mvps"] = 0
+
+        if updates:
+            duelists_col.update_one({"_id": d["_id"]}, {"$set": updates})
+            count += 1
+            
+    await ctx.send(embed=create_embed("Sync Complete", f"{E_SUCCESS} Successfully upgraded **{count}** legacy duelists to the new Esports Engine!", 0x2ecc71))
     
 # ===========================
 #   GROUP 5: GIVEAWAYS
