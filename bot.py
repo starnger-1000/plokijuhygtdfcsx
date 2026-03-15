@@ -4570,6 +4570,54 @@ async def deleteduelist(ctx, duelist_identifier: str):
     db.duelists.delete_one({"_id": duelist["_id"]})
     await ctx.send(embed=create_embed("Profile Erased", f"{E_SUCCESS} Duelist profile for <@{duelist['user_id']}> has been completely wiped from the database.", 0xff0000))
 
+@bot.hybrid_command(name="setoffline", aliases=["leftserver", "markleft"], description="Admin: Manually mark a duelist as 'Left the Server' and refund their club.")
+@commands.has_permissions(administrator=True)
+async def setoffline(ctx, duelist_identifier: str):
+    duelist = get_duelist(duelist_identifier)
+    if not duelist:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Duelist not found.", 0xff0000))
+        
+    if duelist.get("status") == "Left the Server":
+        return await ctx.send(embed=create_embed("Already Offline", f"{E_ERROR} This duelist is already marked as Left the Server.", 0xf1c40f))
+
+    club_id = duelist.get("club_id")
+    refund_amount = 0
+    club_name = "None"
+    
+    # Process Club Refund if they were signed
+    if club_id:
+        club = db.clubs.find_one({"_id": club_id}) or db.clubs.find_one({"id": club_id})
+        if club:
+            club_name = club.get('name', 'Unknown Club')
+            # Refund their live market worth back to the owner
+            refund_amount = duelist.get("market_worth", 100000) 
+            owner_id = club.get("owner_id")
+            
+            if owner_id:
+                if str(owner_id).startswith("group:"):
+                    gname = str(owner_id).replace("group:", "")
+                    db.groups.update_one({"name": gname}, {"$inc": {"funds": refund_amount}})
+                else:
+                    wallets_col.update_one({"user_id": str(owner_id)}, {"$inc": {"balance": refund_amount}})
+                    
+    # Update duelist status
+    db.duelists.update_one(
+        {"_id": duelist["_id"]}, 
+        {"$set": {"status": "Left the Server", "club_id": None, "transfer_listed": False}}
+    )
+    
+    # Cleanup any pending ghost contracts or transfer offers
+    if db is not None:
+        db.contracts.delete_many({"duelist_id": duelist["_id"]})
+        db.pending_contracts.delete_many({"duelist_id": duelist["_id"]})
+        db.pending_transfers.delete_many({"duelist_id": duelist["_id"]})
+    
+    desc = f"{E_SUCCESS} <@{duelist['user_id']}> has been manually marked as **Left the Server**."
+    if refund_amount > 0:
+        desc += f"\n\n{E_MONEY} **Refund Issued:** **${refund_amount:,}** was refunded to **{club_name}**'s owner/group funds."
+        
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Duelist Offline", desc, 0xe74c3c))
+
 # ==============================================================================
 #  PHASE 2: TRANSFER MARKET & CONTRACT COMMANDS
 # ==============================================================================
