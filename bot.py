@@ -144,6 +144,13 @@ BATTLE_BANTER = [
 WINNER_REACTIONS = [":7833dakorcalmao:", ":33730ohoholaugh:", "1443996271990935552", "1443996171071914177"]
 LOSER_REACTIONS = ["<:192978sadchinareact:1443996152772038678>", "1443996269113643028", "1443996139362844783"]
 
+# === TROPHY & AWARD EMOJIS ===
+E_UCL = "<:ucl:1482846831598637098>"
+E_LEAGUE = "<:league:1482846958941900890>"
+E_SUPERCUP = "<:supercup:1482847038310711357>"
+E_BALLONDOR = "<:balondor:1482847124562640967>"
+E_SUPERBALLONDOR = "<:superbalondor:1482847189515374702>"
+
 DONOR_WEIGHTS = {
     972809181444861984: 1, 972809182224994354: 1, 972809183374225478: 2,
     972809180966703176: 2, 972809183718150144: 4, 972809184242434048: 8,
@@ -378,6 +385,270 @@ class Paginator(View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
+# ==============================================================================
+#  PHASE 2: DUELIST TRANSFERS & CONTRACTS UI
+# ==============================================================================
+
+class TransferBuyView(discord.ui.View):
+    def __init__(self, buyer_club, old_club, duelist, price):
+        super().__init__(timeout=None)
+        self.buyer_club = buyer_club
+        self.old_club = old_club
+        self.duelist = duelist
+        self.price = price
+
+    @discord.ui.button(label="Accept Transfer", style=discord.ButtonStyle.success, custom_id="tb_accept")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. Check if buyer still has funds
+        buyer_w = get_wallet(self.buyer_club["owner_id"])
+        if buyer_w.get("balance", 0) < self.price:
+            return await interaction.response.send_message(f"{E_ERROR} The buying club no longer has enough funds to complete this transfer.", ephemeral=True)
+            
+        # 2. Transfer the Money
+        wallets_col.update_one({"user_id": str(self.buyer_club["owner_id"])}, {"$inc": {"balance": -self.price}})
+        if self.old_club and self.old_club.get("owner_id"):
+            wallets_col.update_one({"user_id": str(self.old_club["owner_id"])}, {"$inc": {"balance": self.price}})
+            
+        # 3. Transfer the Duelist
+        db.duelists.update_one(
+            {"_id": self.duelist["_id"]}, 
+            {"$set": {"club_id": self.buyer_club["_id"], "transfer_listed": False, "status": "Signed"}}
+        )
+        # Clear pending transfers
+        db.pending_transfers.delete_many({"duelist_id": self.duelist["_id"]})
+        
+        # Disable buttons
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(embed=create_embed("Transfer Complete", f"{E_SUCCESS} You are now signed to **{self.buyer_club['name']}**!", 0x2ecc71), view=self)
+        
+        # Notify Owners
+        try:
+            buyer = await bot.fetch_user(int(self.buyer_club["owner_id"]))
+            await buyer.send(embed=create_embed("Transfer Accepted", f"{E_SUCCESS} <@{self.duelist['user_id']}> accepted your transfer offer and has joined **{self.buyer_club['name']}**!", 0x2ecc71))
+            if self.old_club and self.old_club.get("owner_id"):
+                old_owner = await bot.fetch_user(int(self.old_club["owner_id"]))
+                await old_owner.send(embed=create_embed("Transfer Complete", f"{E_MONEY} <@{self.duelist['user_id']}> has been sold to **{self.buyer_club['name']}**. **${self.price:,}** has been added to your balance.", 0x2ecc71))
+        except: pass
+
+    @discord.ui.button(label="Put on Hold", style=discord.ButtonStyle.secondary, custom_id="tb_hold")
+    async def hold(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Save to pending deals
+        db.pending_transfers.insert_one({
+            "duelist_id": self.duelist["_id"],
+            "buyer_club_id": self.buyer_club["_id"],
+            "old_club_id": self.old_club["_id"] if self.old_club else None,
+            "price": self.price,
+            "status": "HOLD"
+        })
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(embed=create_embed("Transfer on Hold", f"{E_TIMER} Deal moved to pending. Use `.pendingtransfer` later to review it.", 0xf1c40f), view=self)
+
+    @discord.ui.button(label="Reject Offer", style=discord.ButtonStyle.danger, custom_id="tb_reject")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(embed=create_embed("Transfer Rejected", f"{E_DANGER} You rejected the transfer to **{self.buyer_club['name']}**.", 0xff0000), view=self)
+        try:
+            buyer = await bot.fetch_user(int(self.buyer_club["owner_id"]))
+            await buyer.send(embed=create_embed("Transfer Rejected", f"{E_DANGER} <@{self.duelist['user_id']}> rejected your transfer offer.", 0xff0000))
+        except: pass
+
+
+class ContractSalaryModal(discord.ui.Modal, title="Set Contract Salary"):
+    cash_input = discord.ui.TextInput(label="Cash Salary ($)", placeholder="e.g. 500000", style=discord.TextStyle.short)
+    pc_input = discord.ui.TextInput(label="PC Salary", placeholder="e.g. 10000", style=discord.TextStyle.short)
+
+    def __init__(self, club, duelist, seasons, role):
+        super().__init__()
+        self.club = club
+        self.duelist = duelist
+        self.seasons = seasons
+        self.role = role
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cash = int(self.cash_input.value.replace(",", "").replace("k", "000").replace("m", "000000")) if self.cash_input.value else 0
+        pc = int(self.pc_input.value.replace(",", "").replace("k", "000").replace("m", "000000")) if self.pc_input.value else 0
+        
+        # Save pending contract
+        contract_id = f"cnt_{get_next_id('contract_id')}"
+        db.pending_contracts.insert_one({
+            "id": contract_id, "club_id": self.club["_id"], "duelist_id": self.duelist["_id"],
+            "seasons": self.seasons, "role": self.role, "cash_salary": cash, "pc_salary": pc
+        })
+        
+        await interaction.response.send_message(f"{E_SUCCESS} Contract offer sent to <@{self.duelist['user_id']}>!", ephemeral=True)
+        
+        # DM the Duelist
+        try:
+            duelist_user = await bot.fetch_user(int(self.duelist["user_id"]))
+            desc = (
+                f"{E_CROWN} **Club:** {self.club['name']}\n"
+                f"{E_STARS} **Role:** {self.role}\n"
+                f"{E_TIMER} **Duration:** {self.seasons} Seasons\n\n"
+                f"**Salary:**\n{E_MONEY} **${cash:,}** Cash\n{E_PC} **{pc:,}** PC"
+            )
+            view = ContractAcceptView(contract_id)
+            await duelist_user.send(embed=create_embed(f"{E_BOOK} New Contract Offer", desc, 0xf1c40f), view=view)
+        except: pass
+
+class ContractAcceptView(discord.ui.View):
+    def __init__(self, contract_id):
+        super().__init__(timeout=None)
+        self.contract_id = contract_id
+
+    @discord.ui.button(label="Sign Contract", style=discord.ButtonStyle.success)
+    async def sign(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cnt = db.pending_contracts.find_one({"id": self.contract_id})
+        if not cnt: return await interaction.response.send_message("Contract expired or invalid.", ephemeral=True)
+        
+        # Move to active contracts
+        db.contracts.insert_one(cnt)
+        db.pending_contracts.delete_many({"duelist_id": cnt["duelist_id"]}) # Delete other offers
+        
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(embed=create_embed("Contract Signed", f"{E_SUCCESS} You are officially signed!", 0x2ecc71), view=self)
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.pending_contracts.delete_one({"id": self.contract_id})
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(embed=create_embed("Contract Declined", f"{E_DANGER} You rejected the contract.", 0xff0000), view=self)
+
+# ==============================================================================
+#  CLUB TAX SYSTEM: BACKGROUND TASK & UI
+# ==============================================================================
+
+class PayTaxView(discord.ui.View):
+    def __init__(self, ctx, club, tax_amount):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.club = club
+        self.tax_amount = tax_amount
+
+    @discord.ui.button(label="Pay Tax", style=discord.ButtonStyle.success, custom_id="pay_tax_yes")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id: return
+        
+        w = get_wallet(interaction.user.id)
+        if w.get("balance", 0) < self.tax_amount:
+            return await interaction.response.send_message(embed=create_embed("Insufficient Funds", f"{E_ERROR} You need **${self.tax_amount:,}** {E_MONEY} to pay the tax for **{self.club['name']}**.", 0xff0000), ephemeral=True)
+            
+        # Deduct cash & update club tax due date (+30 days) and reset warning stages
+        wallets_col.update_one({"user_id": str(interaction.user.id)}, {"$inc": {"balance": -self.tax_amount}})
+        
+        # Add 30 days to the deadline
+        current_due = self.club.get("tax_due_date", datetime.now())
+        new_due = max(datetime.now(), current_due) + timedelta(days=30)
+        
+        db.clubs.update_one({"_id": self.club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
+        
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        
+        # Send Premium DM
+        try:
+            dm_desc = f"{E_SUCCESS} Your tax of **${self.tax_amount:,}** {E_MONEY} for **{self.club['name']}** has been successfully paid!\n\n{E_TIMER} **Next Payment Due:** <t:{int(new_due.timestamp())}:f>"
+            await interaction.user.send(embed=create_embed(f"{E_CROWN} Tax Renewed", dm_desc, 0x2ecc71))
+        except: pass
+        
+        await interaction.followup.send(embed=create_embed("Tax Paid", f"{E_SUCCESS} Tax successfully paid for **{self.club['name']}**.", 0x2ecc71))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, custom_id="pay_tax_no")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id: return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        
+        try:
+            await interaction.user.send(embed=create_embed(f"{E_ERROR} Payment Cancelled", f"You cancelled the tax payment for **{self.club['name']}**.", 0xff0000))
+        except: pass
+        await interaction.followup.send("Tax payment cancelled.", ephemeral=True)
+
+async def club_tax_alert_task():
+    """Background loop to check club taxes, send DMs, and disown expired clubs."""
+    await bot.wait_until_ready()
+    
+    # Reminder stages mapping (Hours Left -> Stage Level)
+    stages = [
+        (360, 1, "15 Days"), (240, 2, "10 Days"), (120, 3, "5 Days"), 
+        (72, 4, "3 Days"), (48, 5, "2 Days"), (24, 6, "1 Day"), 
+        (12, 7, "12 Hours"), (6, 8, "6 Hours"), (1, 9, "1 Hour")
+    ]
+    
+    while not bot.is_closed():
+        now = datetime.now()
+        # Find all owned clubs
+        owned_clubs = db.clubs.find({"owner_id": {"$ne": None}})
+        
+        for club in owned_clubs:
+            due_date = club.get("tax_due_date")
+            if not due_date: continue 
+            
+            time_left = due_date - now
+            hours_left = time_left.total_seconds() / 3600
+            current_stage = club.get("tax_reminder_stage", 0)
+            
+            # Check for Expiration (Disown Club)
+            if hours_left <= 0:
+                db.clubs.update_one({"_id": club["_id"]}, {"$set": {"owner_id": None, "tax_due_date": None, "tax_reminder_stage": 0}})
+                try:
+                    user = bot.get_user(int(club["owner_id"])) or await bot.fetch_user(int(club["owner_id"]))
+                    desc = f"{E_DANGER} Your ownership of **{club['name']}** has been officially revoked because you failed to pay the required 25% club tax in time. \n\nThe club is now unsold and back on the public market."
+                    await user.send(embed=create_embed(f"{E_ALERT} Club Disowned", desc, 0xff0000))
+                except: pass
+                continue
+            
+            # Check Reminders
+            for req_hours, stage_num, time_text in stages:
+                if hours_left <= req_hours and current_stage < stage_num:
+                    tax_amount = int(club.get("value", 0) * 0.25) # 25% of Live Worth
+                    try:
+                        user = bot.get_user(int(club["owner_id"])) or await bot.fetch_user(int(club["owner_id"]))
+                        desc = (
+                            f"{E_ALERT} Your club **{club['name']}** has pending taxes!\n\n"
+                            f"{E_MONEY} **Tax Amount:** ${tax_amount:,}\n"
+                            f"{E_TIMER} **Time Remaining:** {time_text} (<t:{int(due_date.timestamp())}:R>)\n\n"
+                            f"Use `.paytax {club['name']}` in the server to pay and avoid losing your club!"
+                        )
+                        await user.send(embed=create_embed(f"{E_CROWN} Tax Reminder: {time_text} Left", desc, 0xf1c40f))
+                    except: pass
+                    
+                    db.clubs.update_one({"_id": club["_id"]}, {"$set": {"tax_reminder_stage": stage_num}})
+                    break # Only trigger one stage per loop cycle
+
+        await asyncio.sleep(600) # Check the database every 10 minutes
+
+async def club_market_simulation_task():
+    """Background loop to fluctuate club values every hour automatically."""
+    await bot.wait_until_ready()
+    
+    while not bot.is_closed():
+        # Wait 1 hour (3600 seconds) between each market shift
+        await asyncio.sleep(3600)
+        
+        clubs = list(db.clubs.find({}))
+        for club in clubs:
+            current_value = club.get("value", 1000000) # Fallback if missing
+            
+            # Fluctuate between -8% and +10% (Slight upward bias to reward holding)
+            fluctuation_modifier = random.uniform(0.92, 1.10)
+            new_value = int(current_value * fluctuation_modifier)
+            
+            # Set a hard floor so a club never drops below $100k and becomes worthless
+            if new_value < 100000:
+                new_value = random.randint(100000, 150000)
+                
+           # Update the database and save the old value to track trends!
+            db.clubs.update_one(
+                {"_id": club["_id"]},
+                {"$set": {
+                    "value": new_value,
+                    "previous_value": current_value 
+                }}
+            )
+            
 class ParticipantView(discord.ui.View):
     def __init__(self, message_id, required_roles=None):
         super().__init__(timeout=None)
@@ -614,6 +885,41 @@ async def on_message(message):
     # Notice how it is outdented all the way to the left so it runs no matter what.
     await bot.process_commands(message)
 
+# ==============================================================================
+#  DUELIST SYSTEM: CORE & EVENTS
+# ==============================================================================
+
+def get_duelist(identifier):
+    """Fetches a duelist by Discord ID mention, or Duelist ID."""
+    if identifier.startswith("<@") and identifier.endswith(">"):
+        user_id = identifier.replace("<@", "").replace("!", "").replace(">", "")
+        return db.duelists.find_one({"user_id": user_id})
+    else:
+        return db.duelists.find_one({"duelist_id": identifier.upper()})
+
+@bot.event
+async def on_member_remove(member):
+    # Auto-handle duelists leaving the server
+    if db is None: return
+    duelist = db.duelists.find_one({"user_id": str(member.id)})
+    
+    if duelist:
+        club_id = duelist.get("club_id")
+        if club_id:
+            # Refund the club owner or group fund
+            club = db.clubs.find_one({"_id": club_id})
+            if club:
+                refund = duelist.get("last_purchase_price", 0)
+                owner_id = club.get("owner_id")
+                if owner_id:
+                    wallets_col.update_one({"user_id": owner_id}, {"$inc": {"balance": refund}})
+                
+        # Update duelist status
+        db.duelists.update_one(
+            {"_id": duelist["_id"]}, 
+            {"$set": {"status": "Left the Server", "club_id": None, "transfer_listed": False}}
+        )
+
 def get_group_total_shares(group_name):
     """Calculates total shares owned in a group."""
     if db is None: return 0
@@ -666,6 +972,20 @@ async def profile(ctx, member: discord.Member = None):
     if prof and prof.get("owned_club_id"):
         c = clubs_col.find_one({"id": prof["owned_club_id"]})
         if c: embed.add_field(name="Owned Club", value=f"{c['name']} (100%)", inline=False)
+           
+    # --- INDIVIDUAL AWARDS INJECTION ---
+    awards_text = ""
+    if w and w.get("t_ballondor", 0) > 0:
+        b = w["t_ballondor"]
+        awards_text += f"**Ballon d'Ors**\n{b}x " + (E_BALLONDOR * b) + "\n\n"
+    if w and w.get("t_sballondor", 0) > 0:
+        sb = w["t_sballondor"]
+        awards_text += f"**Super Ballon d'Ors**\n{sb}x " + (E_SUPERBALLONDOR * sb) + "\n\n"
+        
+    if awards_text:
+        embed.add_field(name=f"{E_STARS} Player Awards", value=awards_text.strip(), inline=False)
+    # -----------------------------------
+    
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="wallet", aliases=["wl","balance", "bal", "Bal"], description="Check your balance.")
@@ -1630,6 +1950,65 @@ async def clubinfo(ctx, *, club_name_or_id: str):
     embed.add_field(name="Value", value=f"{E_MONEY} ${c['value']:,}", inline=True)
     embed.add_field(name="Manager", value=f"{E_ADMIN} {manager_name}", inline=True)
     embed.add_field(name=f"{E_ITEMBOX} Duelists", value=d_list, inline=False)
+
+# --- CLUB TROPHIES INJECTION ---
+    trophies_text = ""
+    if c.get("t_ucl", 0) > 0:
+        count = c["t_ucl"]
+        trophies_text += f"**UCL Titles**\n{count}x " + (E_UCL * count) + "\n\n"
+    if c.get("t_league", 0) > 0:
+        count = c["t_league"]
+        trophies_text += f"**League Titles**\n{count}x " + (E_LEAGUE * count) + "\n\n"
+    if c.get("t_supercup", 0) > 0:
+        count = c["t_supercup"]
+        trophies_text += f"**Super Cups**\n{count}x " + (E_SUPERCUP * count) + "\n\n"
+        
+    if trophies_text:
+        embed.add_field(name=f"{E_STARS} Club Trophy Cabinet", value=trophies_text.strip(), inline=False)
+    # -------------------------------
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name="trend", aliases=["marketnews", "market"], description="View the live club market trends.")
+async def trend(ctx):
+    # Fetch all clubs that have been processed by the simulation at least once
+    clubs = list(db.clubs.find({"previous_value": {"$exists": True}}))
+    
+    if not clubs:
+        return await ctx.send(embed=create_embed("Market Alert", f"{E_ALERT} The market simulation hasn't run yet. Check back in an hour!", 0xf1c40f))
+        
+    trends = []
+    for c in clubs:
+        curr = c.get("value", 100000)
+        prev = c.get("previous_value", 100000)
+        if prev <= 0: prev = 1 # Prevent division by zero
+        
+        pct = ((curr - prev) / prev) * 100
+        trends.append((c['name'], curr, prev, pct))
+        
+    # Sort clubs by percentage change (Highest to Lowest)
+    trends.sort(key=lambda x: x[3], reverse=True)
+    
+    top_gainers = [t for t in trends if t[3] > 0][:5]
+    top_losers = [t for t in trends if t[3] < 0][-5:]
+    top_losers.reverse() # Put the most negative at the top of the losers list
+    
+    desc = f"The live market updates every hour. Here are the biggest movers:\n\n"
+    
+    if top_gainers:
+        desc += f"**{E_SUCCESS} Top Gainers**\n"
+        for name, curr, prev, pct in top_gainers:
+            desc += f"**{name}** | {E_MONEY} **${curr:,}** `(+{pct:.1f}%)`\n"
+            
+    if top_losers:
+        desc += f"\n**{E_DANGER} Top Losers**\n"
+        for name, curr, prev, pct in top_losers:
+            desc += f"**{name}** | {E_MONEY} **${curr:,}** `({pct:.1f}%)`\n"
+            
+    if not top_gainers and not top_losers:
+        desc += f"{E_STARS} *The market is completely stable right now.*"
+            
+    embed = create_embed(f"{E_BOOK} Live Market Trends", desc, 0x3498db)
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="clublevel", aliases=["cl"], description="Check club level.")
@@ -2091,6 +2470,109 @@ async def deductsalary(ctx, duelist_id: int, confirm: str):
     log_user_activity(d["discord_user_id"], "Penalty", f"Fined ${penalty:,} for missed match.")
     await ctx.send(embed=create_embed(f"{E_ALERT} Penalty", f"Fined **${penalty:,}** from **{d['username']}**'s wallet.", 0xff0000))
 
+# ==============================================================================
+#  CLUB TAX COMMANDS
+# ==============================================================================
+
+@bot.command(name="taxinfo", aliases=["ti"], description="View your club's tax status.")
+async def taxinfo(ctx, *, club_name: str = None):
+    query = {"owner_id": str(ctx.author.id)}
+    if club_name:
+        query["name"] = {"$regex": f"^{club_name}$", "$options": "i"}
+        
+    clubs = list(db.clubs.find(query))
+    if not clubs:
+        return await ctx.send(embed=create_embed("No Clubs Found", f"{E_ERROR} You don't own any clubs matching that name.", 0xff0000))
+        
+    embed = discord.Embed(title=f"{E_BOOK} Club Tax Information", color=0x3498db)
+    if ctx.author.avatar: embed.set_thumbnail(url=ctx.author.avatar.url)
+        
+    for club in clubs:
+        tax_amount = int(club.get("value", 0) * 0.25)
+        due_date = club.get("tax_due_date")
+        
+        if due_date:
+            time_left = due_date - datetime.now()
+            days_left = max(0, time_left.days)
+            status = f"⏳ {days_left} Days Left (<t:{int(due_date.timestamp())}:R>)"
+        else:
+            status = "✅ 30-Day Grace Period Active."
+            
+        embed.add_field(
+            name=f"{E_CROWN} {club['name']}",
+            value=f"{E_MONEY} **Tax Due:** ${tax_amount:,}\n{E_TIMER} **Deadline:** {status}\n*Tax is 25% of live worth (${club.get('value', 0):,})*",
+            inline=False
+        )
+        
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="paytax", aliases=["ptx"], description="Pay the tax for your club.")
+async def paytax(ctx, *, club_name: str):
+    club = db.clubs.find_one({"owner_id": str(ctx.author.id), "name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    
+    if not club:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You don't own a club named **{club_name}**.", 0xff0000))
+        
+    tax_amount = int(club.get("value", 0) * 0.25)
+    
+    desc = (
+        f"Are you sure you want to pay the tax for **{club['name']}**?\n\n"
+        f"{E_MONEY} **Amount Due:** ${tax_amount:,}\n"
+        f"{E_TIMER} **Extends Deadline By:** 30 Days"
+    )
+    embed = create_embed(f"{E_MONEY} Pay Club Tax", desc, 0xf1c40f)
+    
+    view = PayTaxView(ctx, club, tax_amount)
+    await ctx.send(embed=embed, view=view)
+
+
+@bot.command(name="removetax", aliases=["rtx"], description="Admin: Waive tax for a club for 1 month.")
+@commands.has_permissions(administrator=True)
+async def removetax(ctx, *, club_name: str):
+    club = db.clubs.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    if not club or not club.get("owner_id"):
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found or has no owner.", 0xff0000))
+        
+    current_due = club.get("tax_due_date", datetime.now())
+    new_due = max(datetime.now(), current_due) + timedelta(days=30)
+    
+    db.clubs.update_one({"_id": club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
+    
+    desc = f"{E_SUCCESS} Successfully waived tax for **{club['name']}**.\n{E_TIMER} **New Deadline:** <t:{int(new_due.timestamp())}:f>"
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Tax Waived", desc, 0x2ecc71))
+
+
+@bot.command(name="unpaidtax", aliases=["uptx"], description="Admin: View clubs with upcoming or unpaid taxes.")
+@commands.has_permissions(administrator=True)
+async def unpaidtax(ctx):
+    # Sort by tax due date ascending (closest to expiring first)
+    clubs = list(db.clubs.find({"owner_id": {"$ne": None}, "tax_due_date": {"$ne": None}}).sort("tax_due_date", 1))
+    
+    if not clubs:
+        return await ctx.send(embed=create_embed("All Good", f"{E_SUCCESS} No clubs have pending taxes.", 0x2ecc71))
+        
+    data = []
+    now = datetime.now()
+    
+    for c in clubs:
+        due = c["tax_due_date"]
+        tax_amount = int(c.get("value", 0) * 0.25)
+        time_left = due - now
+        
+        if time_left.total_seconds() < 0:
+            status = "🚨 EXPIRED"
+        else:
+            days = time_left.days
+            status = f"⏳ {days} Days Left" if days > 0 else f"⏳ {int(time_left.total_seconds() // 3600)} Hours Left"
+            
+        title = f"{c['name']} | Tax: ${tax_amount:,}"
+        desc = f"{E_CROWN} **Owner:** <@{c['owner_id']}>\n{E_TIMER} **Due:** <t:{int(due.timestamp())}:R> ({status})"
+        data.append((title, desc))
+        
+    view = Paginator(ctx, data, f"{E_ADMIN} Unpaid Club Taxes Queue", 0xe74c3c)
+    await ctx.send(embed=view.get_embed(), view=view)
+
 # ===========================
 #   GROUP 4: ADMIN
 # ===========================
@@ -2294,22 +2776,44 @@ async def registerbattle(ctx, club_a_name: str, club_b_name: str):
 async def battleresult(ctx, battle_id: int, winner_name: str):
     b = battles_col.find_one({"id": int(battle_id)})
     if not b: return await ctx.send(embed=create_embed("Error", "Battle not found.", 0xff0000))
+    
     wc = clubs_col.find_one({"name": {"$regex": f"^{winner_name}$", "$options": "i"}})
     if not wc: return await ctx.send(embed=create_embed("Error", "Winner not found.", 0xff0000))
+    
     loser_id = b['club_a'] if b['club_b'] == wc['id'] else b['club_b']
     lc = clubs_col.find_one({"id": loser_id})
+    
     clubs_col.update_one({"id": wc['id']}, {"$inc": {"value": WIN_VALUE_BONUS}})
     clubs_col.update_one({"id": loser_id}, {"$inc": {"value": LOSS_VALUE_PENALTY}})
     battles_col.update_one({"id": int(battle_id)}, {"$set": {"status": "COMPLETED"}})
     update_club_level(wc['id'], 1)
+
+    # --- DUELIST W/L MARKET UPDATE ---
+    # Win: +1 Win, +1 Match, +$50k
+    db.duelists.update_many(
+        {"club_id": wc["_id"]}, 
+        {"$inc": {"wins": 1, "matches": 1, "market_worth": 50000}}
+    )
+    
+    # Loss: +1 Loss, +1 Match, -$50k (Minimum value $10k)
+    losing_duelists = db.duelists.find({"club_id": lc["_id"]})
+    for d in losing_duelists:
+        new_worth = max(10000, d.get("market_worth", 100000) - 50000)
+        db.duelists.update_one(
+            {"_id": d["_id"]}, 
+            {"$inc": {"losses": 1, "matches": 1}, "$set": {"market_worth": new_worth}}
+        )
+    # ---------------------------------
+
     banter = random.choice(BATTLE_BANTER)
     winner_emoji = resolve_emoji(random.choice(WINNER_REACTIONS))
     loser_emoji = resolve_emoji(random.choice(LOSER_REACTIONS))
     final_banter = banter.format(winner=wc['name'], loser=lc['name'], w_emoji=winner_emoji, l_emoji=loser_emoji)
+    
     embed_log = create_embed(f"{E_FIRE} Match Result", f"{resolve_emoji(E_CROWN)} **Winner:** {wc['name']} {winner_emoji}\n{resolve_emoji(E_DANGER)} **Loser:** {lc['name']} {loser_emoji}\n\n_{final_banter}_", 0xe74c3c)
     await send_log("battle", embed_log)
     await ctx.send(embed=embed_log)
-
+    
 @bot.hybrid_command(name="checkclubmessages", description="Admin: Activity bonus.")
 @commands.has_permissions(administrator=True)
 async def checkclubmessages(ctx, club_name: str, count: int):
@@ -2481,6 +2985,55 @@ async def massbox(ctx, amount: int, members: commands.Greedy[discord.Member]):
     # 4. Send the Admin Confirmation in Chat
     desc = f"{E_SUCCESS} Successfully added **{amount:,}** {E_ITEMBOX} PC Box(es) to **{success_count}** user(s)!"
     await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Box Transfer", desc, 0x3498db))    
+
+# ==============================================================================
+#  TROPHY AWARD COMMANDS (ADMIN ONLY)
+# ==============================================================================
+
+@bot.command(name="ucl", description="Admin: Award a UCL trophy to a club.")
+@commands.has_permissions(administrator=True)
+async def ucl(ctx, *, club_name: str):
+    club = db.clubs.find_one_and_update(
+        {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
+        {"$inc": {"t_ucl": 1}},
+        return_document=ReturnDocument.AFTER
+    )
+    if not club: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
+    await ctx.send(embed=create_embed(f"{E_UCL} UCL Awarded!", f"{E_SUCCESS} **{club['name']}** won the UCL!\nThey now have **{club.get('t_ucl', 1)}x** {E_UCL}", 0xf1c40f))
+
+@bot.command(name="league", description="Admin: Award a League title to a club.")
+@commands.has_permissions(administrator=True)
+async def league(ctx, *, club_name: str):
+    club = db.clubs.find_one_and_update(
+        {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
+        {"$inc": {"t_league": 1}},
+        return_document=ReturnDocument.AFTER
+    )
+    if not club: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
+    await ctx.send(embed=create_embed(f"{E_LEAGUE} League Awarded!", f"{E_SUCCESS} **{club['name']}** won the League!\nThey now have **{club.get('t_league', 1)}x** {E_LEAGUE}", 0xf1c40f))
+
+@bot.command(name="supercup", description="Admin: Award a Super Cup to a club.")
+@commands.has_permissions(administrator=True)
+async def supercup(ctx, *, club_name: str):
+    club = db.clubs.find_one_and_update(
+        {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
+        {"$inc": {"t_supercup": 1}},
+        return_document=ReturnDocument.AFTER
+    )
+    if not club: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found.", 0xff0000))
+    await ctx.send(embed=create_embed(f"{E_SUPERCUP} Super Cup Awarded!", f"{E_SUCCESS} **{club['name']}** won the Super Cup!\nThey now have **{club.get('t_supercup', 1)}x** {E_SUPERCUP}", 0xf1c40f))
+
+@bot.command(name="ballondor", description="Admin: Award a Ballon d'Or to a user.")
+@commands.has_permissions(administrator=True)
+async def ballondor(ctx, user: discord.Member):
+    w = wallets_col.find_one_and_update({"user_id": str(user.id)}, {"$inc": {"t_ballondor": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
+    await ctx.send(embed=create_embed(f"{E_BALLONDOR} Ballon d'Or Awarded!", f"{E_SUCCESS} <@{user.id}> won the Ballon d'Or!\nThey now have **{w.get('t_ballondor', 1)}x** {E_BALLONDOR}", 0xf1c40f))
+
+@bot.command(name="superballondor", aliases=["sballondor"], description="Admin: Award a Super Ballon d'Or to a user.")
+@commands.has_permissions(administrator=True)
+async def superballondor(ctx, user: discord.Member):
+    w = wallets_col.find_one_and_update({"user_id": str(user.id)}, {"$inc": {"t_sballondor": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
+    await ctx.send(embed=create_embed(f"{E_SUPERBALLONDOR} Super Ballon d'Or Awarded!", f"{E_SUCCESS} <@{user.id}> won the Super Ballon d'Or!\nThey now have **{w.get('t_sballondor', 1)}x** {E_SUPERBALLONDOR}", 0xf1c40f))
 
 @bot.hybrid_command(name="massaddsc", aliases=["masc"], description="Admin: Add Shiny Coins to multiple users.")
 @commands.has_permissions(administrator=True)
@@ -2789,8 +3342,15 @@ async def managedeal(ctx, deal_id: str, action: str):
                 db.pending_deals.delete_one({"_id": deal["_id"]})
                 return await ctx.send(embed=create_embed("Error", "Club is already owned! Deal cancelled and refunded.", 0xff0000))
 
-            # Transfer Ownership
-            clubs_col.update_one({"id": c["id"]}, {"$set": {"owner_id": buyer_id}})
+           # Transfer Ownership with Tax Timer
+            clubs_col.update_one(
+                {"id": c["id"]}, 
+                {"$set": {
+                    "owner_id": buyer_id,
+                    "tax_due_date": datetime.now() + timedelta(days=30),
+                    "tax_reminder_stage": 0
+                }}
+            )
             
             # If User (not group), update profile
             if not buyer_id.startswith("group:") and deal.get("type") != "group":
@@ -3821,6 +4381,228 @@ async def use(ctx, item_name: str):
     if prize.get("image_url"): embed.set_thumbnail(url=prize["image_url"])
     await ctx.send(embed=embed)
 
+# ==============================================================================
+#  GROUP 8: DUELISTS SYSTEM COMMANDS
+# ==============================================================================
+
+@bot.command(name="duelistinfo", aliases=["di"], description="View a Duelist's profile and stats.")
+async def duelistinfo(ctx, identifier: str = None):
+    target_user = ctx.author
+    
+    if identifier:
+        duelist = get_duelist(identifier)
+        if not duelist:
+            return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} Duelist not found. Ensure they are registered.", 0xff0000))
+    else:
+        duelist = db.duelists.find_one({"user_id": str(ctx.author.id)})
+        if not duelist:
+            return await ctx.send(embed=create_embed("Not Registered", f"{E_ERROR} You are not registered as a duelist.", 0xff0000))
+
+    try: target_user = await bot.fetch_user(int(duelist["user_id"]))
+    except: pass
+
+    club_name = "Free Agent"
+    if duelist.get("club_id"):
+        club = db.clubs.find_one({"_id": duelist["club_id"]})
+        if club: club_name = club["name"]
+
+   # Fetch wallet for Ballon d'Or stats
+    w = get_wallet(target_user.id)
+    awards_text = ""
+    if w.get("t_ballondor", 0) > 0:
+        b = w["t_ballondor"]
+        awards_text += f"\n\n**Ballon d'Ors**\n{b}x " + (E_BALLONDOR * b)
+    if w.get("t_sballondor", 0) > 0:
+        sb = w["t_sballondor"]
+        awards_text += f"\n\n**Super Ballon d'Ors**\n{sb}x " + (E_SUPERBALLONDOR * sb)
+
+    desc = (
+        f"{E_CROWN} **Duelist ID:** `{duelist.get('duelist_id', 'N/A')}`\n"
+        f"{E_ADMIN} **Status:** {duelist.get('status', 'Free Agent')}\n"
+        f"{E_BOOST} **Current Club:** {club_name}\n"
+        f"{E_MONEY} **Market Value:** ${duelist.get('market_worth', 100000):,}\n\n"
+        f"**🏆 Match Statistics**\n"
+        f"**Matches:** {duelist.get('matches', 0)} | **MVPs:** {duelist.get('mvps', 0)}\n"
+        f"**Wins:** {duelist.get('wins', 0)} | **Losses:** {duelist.get('losses', 0)} | **Draws:** {duelist.get('draws', 0)}"
+        f"{awards_text}" # <--- THIS ADDS THE TROPHIES AT THE BOTTOM!
+    )
+    
+    embed = create_embed(f"{E_STARS} Duelist Profile: {target_user.display_name}", desc, 0x3498db)
+    if target_user.avatar: embed.set_thumbnail(url=target_user.avatar.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="duelistleaderboard", aliases=["dlb"], description="View top duelists by market worth.")
+async def duelistleaderboard(ctx):
+    duelists = list(db.duelists.find({"status": {"$ne": "Left the Server"}}).sort("market_worth", -1).limit(50))
+    if not duelists: return await ctx.send("No duelists registered.")
+        
+    data = []
+    for i, d in enumerate(duelists):
+        title = f"#{i+1} | ID: {d.get('duelist_id')} | <@{d['user_id']}>"
+        desc = f"{E_MONEY} **Worth:** ${d.get('market_worth', 0):,} | {E_STARS} **Wins:** {d.get('wins', 0)}"
+        data.append((title, desc))
+        
+    view = Paginator(ctx, data, f"{E_CROWN} Top Duelists", 0xf1c40f)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+
+@bot.command(name="battledrew", aliases=["bdrew"], description="Admin: Mark a battle as a draw.")
+@commands.has_permissions(administrator=True)
+async def battledrew(ctx, battle_id: str):
+    # Fetch battle and clubs involved (Assuming you have a battles collection)
+    # Give +1 Draw, +1 Match, +$25k to all duelists in both clubs
+    db.duelists.update_many(
+        {"club_id": {"$in": ["CLUB_1_ID_HERE", "CLUB_2_ID_HERE"]}}, # Replace with actual logic to fetch clubs from battle
+        {"$inc": {"draws": 1, "matches": 1, "market_worth": 25000}}
+    )
+    await ctx.send(embed=create_embed("Battle Drawn", f"{E_SUCCESS} Battle `{battle_id}` marked as a draw. All duelists updated.", 0x2ecc71))
+
+
+@bot.command(name="battlemvp", aliases=["bmvp"], description="Admin: Award MVP for a battle.")
+@commands.has_permissions(administrator=True)
+async def battlemvp(ctx, battle_id: str, duelist_identifier: str):
+    duelist = get_duelist(duelist_identifier)
+    if not duelist: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Duelist not found.", 0xff0000))
+        
+    db.duelists.update_one({"_id": duelist["_id"]}, {"$inc": {"mvps": 1, "market_worth": 100000}})
+    await ctx.send(embed=create_embed("MVP Awarded", f"{E_STARS} <@{duelist['user_id']}> awarded MVP for Battle `{battle_id}`! Market worth increased by $100k.", 0xf1c40f))
+
+
+@bot.command(name="removeduelist", aliases=["rdc"], description="Admin: Remove a duelist from their club.")
+@commands.has_permissions(administrator=True)
+async def removeduelist(ctx, duelist_identifier: str):
+    duelist = get_duelist(duelist_identifier)
+    if not duelist: return await ctx.send("Duelist not found.")
+        
+    db.duelists.update_one({"_id": duelist["_id"]}, {"$set": {"club_id": None, "status": "Free Agent"}})
+    await ctx.send(embed=create_embed("Duelist Removed", f"{E_SUCCESS} <@{duelist['user_id']}> is now a Free Agent.", 0x2ecc71))
+
+
+@bot.command(name="deleteduelist", aliases=["ddlist"], description="Admin: Delete a duelist profile permanently.")
+@commands.has_permissions(administrator=True)
+async def deleteduelist(ctx, duelist_identifier: str):
+    duelist = get_duelist(duelist_identifier)
+    if not duelist: return await ctx.send("Duelist not found.")
+        
+    db.duelists.delete_one({"_id": duelist["_id"]})
+    await ctx.send(embed=create_embed("Profile Erased", f"{E_SUCCESS} Duelist profile for <@{duelist['user_id']}> has been completely wiped from the database.", 0xff0000))
+
+# ==============================================================================
+#  PHASE 2: TRANSFER MARKET & CONTRACT COMMANDS
+# ==============================================================================
+
+@bot.command(name="requesttransfer", aliases=["rtransfer", "rt"], description="Request to be added to the Transfer Market.")
+async def requesttransfer(ctx):
+    duelist = db.duelists.find_one({"user_id": str(ctx.author.id)})
+    if not duelist: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You are not a registered duelist.", 0xff0000))
+        
+    current_status = duelist.get("transfer_listed", False)
+    db.duelists.update_one({"_id": duelist["_id"]}, {"$set": {"transfer_listed": not current_status}})
+    
+    status_msg = "ADDED TO" if not current_status else "REMOVED FROM"
+    await ctx.send(embed=create_embed("Transfer Market", f"{E_SUCCESS} You have been **{status_msg}** the Transfer Market.", 0x2ecc71))
+
+@bot.command(name="transfermarket", aliases=["tm"], description="View duelists seeking a transfer.")
+async def transfermarket(ctx):
+    duelists = list(db.duelists.find({"transfer_listed": True}))
+    if not duelists: return await ctx.send(embed=create_embed("Transfer Market", f"{E_ERROR} The transfer market is currently empty.", 0x95a5a6))
+        
+    data = []
+    for d in duelists:
+        title = f"ID: {d.get('duelist_id')} | <@{d['user_id']}>"
+        desc = f"{E_MONEY} **Value:** ${d.get('market_worth', 100000):,}\n{E_STARS} **Wins:** {d.get('wins', 0)} | **Matches:** {d.get('matches', 0)}"
+        data.append((title, desc))
+        
+    view = Paginator(ctx, data, f"{E_ADMIN} Live Transfer Market", 0x3498db)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.command(name="transferbuy", aliases=["tb"], description="Club Owner: Buy a duelist from the transfer market.")
+async def transferbuy(ctx, duelist_id: str):
+    buyer_club = db.clubs.find_one({"owner_id": str(ctx.author.id)})
+    if not buyer_club: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You must own a club to buy a duelist.", 0xff0000))
+        
+    duelist = get_duelist(duelist_id)
+    if not duelist or not duelist.get("transfer_listed"): 
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Duelist not found or not on the transfer market.", 0xff0000))
+        
+    price = duelist.get("market_worth", 100000)
+    old_club = db.clubs.find_one({"_id": duelist["club_id"]}) if duelist.get("club_id") else None
+    
+    # Send UI to Duelist
+    try:
+        duelist_user = await bot.fetch_user(int(duelist["user_id"]))
+        desc = f"**{buyer_club['name']}** wants to buy you from the Transfer Market for **${price:,}**!"
+        view = TransferBuyView(buyer_club, old_club, duelist, price)
+        await duelist_user.send(embed=create_embed(f"{E_CROWN} Transfer Offer", desc, 0xf1c40f), view=view)
+        await ctx.send(embed=create_embed("Offer Sent", f"{E_SUCCESS} Transfer offer sent to <@{duelist['user_id']}>'s DMs!", 0x2ecc71))
+    except Exception as e:
+        await ctx.send(embed=create_embed("Error", f"{E_ERROR} Could not DM the duelist. They must open their DMs.", 0xff0000))
+
+@bot.command(name="contract", aliases=["signup"], description="Club Owner: Offer a contract to a duelist.")
+async def contract(ctx, duelist_identifier: str, seasons: int, role: str):
+    """Usage: .contract @user 3 Crucial"""
+    club = db.clubs.find_one({"owner_id": str(ctx.author.id)})
+    if not club: return await ctx.send("You don't own a club.")
+        
+    duelist = get_duelist(duelist_identifier)
+    if not duelist: return await ctx.send("Duelist not found.")
+        
+    if seasons < 1 or seasons > 5: return await ctx.send("Seasons must be between 1 and 5.")
+    valid_roles = ["crucial", "rotational", "sub"]
+    if role.lower() not in valid_roles: return await ctx.send("Role must be: Crucial, Rotational, or Sub.")
+
+    # Send Modal for Salary
+    view = discord.ui.View()
+    button = discord.ui.Button(label="Set Salary & Send Offer", style=discord.ButtonStyle.success)
+    
+    async def button_callback(interaction: discord.Interaction):
+        if interaction.user.id != ctx.author.id: return
+        await interaction.response.send_modal(ContractSalaryModal(club, duelist, seasons, role.capitalize()))
+        
+    button.callback = button_callback
+    view.add_item(button)
+    
+    desc = f"**Duelist:** <@{duelist['user_id']}>\n**Seasons:** {seasons}\n**Role:** {role.capitalize()}\n\nClick below to set the salary."
+    await ctx.send(embed=create_embed("Contract Wizard", desc, 0x3498db), view=view)
+
+@bot.command(name="contractinfo", aliases=["tci"], description="View details of a duelist's active contract.")
+async def contractinfo(ctx, duelist_identifier: str):
+    duelist = get_duelist(duelist_identifier)
+    if not duelist: return await ctx.send("Duelist not found.")
+        
+    cnt = db.contracts.find_one({"duelist_id": duelist["_id"]})
+    if not cnt: return await ctx.send(embed=create_embed("No Contract", f"<@{duelist['user_id']}> does not have an active contract.", 0xff0000))
+        
+    club = db.clubs.find_one({"_id": cnt["club_id"]})
+    club_name = club["name"] if club else "Unknown Club"
+    
+    desc = (
+        f"{E_CROWN} **Club:** {club_name}\n"
+        f"{E_STARS} **Role:** {cnt.get('role', 'N/A')}\n"
+        f"{E_TIMER} **Seasons Left:** {cnt.get('seasons', 0)}\n\n"
+        f"**Salary per Season:**\n{E_MONEY} **${cnt.get('cash_salary', 0):,}**\n{E_PC} **{cnt.get('pc_salary', 0):,}** PC"
+    )
+    await ctx.send(embed=create_embed(f"{E_BOOK} Contract Info: <@{duelist['user_id']}>", desc, 0x9b59b6))
+
+@bot.command(name="seasonend", aliases=["sed"], description="Admin: Advance the season by 1. Updates all contracts.")
+@commands.has_permissions(administrator=True)
+async def seasonend(ctx):
+    # 1. Deduct 1 season from all active contracts
+    db.contracts.update_many({}, {"$inc": {"seasons": -1}})
+    
+    # 2. Find expired contracts (Seasons <= 0)
+    expired = list(db.contracts.find({"seasons": {"$lte": 0}}))
+    expired_ids = [c["duelist_id"] for c in expired]
+    
+    # 3. Make them Free Agents & Delete contracts
+    if expired_ids:
+        db.duelists.update_many({"_id": {"$in": expired_ids}}, {"$set": {"status": "Free Agent", "club_id": None}})
+        db.contracts.delete_many({"_id": {"$in": [c["_id"] for c in expired]}})
+        
+    desc = f"{E_SUCCESS} The Season has officially ended!\nAll contracts have been reduced by 1 season.\n**{len(expired)}** duelists have finished their contracts and entered Free Agency."
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Season Advancement", desc, 0x2ecc71))
+
 # --- START OF HELP MENU & BOTINFO ---
 
 class HelpSelect(Select):
@@ -4028,6 +4810,8 @@ async def on_ready():
         bot.add_view(BotInfoView())
         
         bot.loop.create_task(pc_claim_alert_task())
+        bot.loop.create_task(club_tax_alert_task())
+        bot.loop.create_task(club_market_simulation_task()) # <-- The new live market!
         
         # 2. Start Market Simulation (If not running)
         if not hasattr(bot, 'market_task_started'):
