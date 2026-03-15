@@ -2480,7 +2480,7 @@ async def massbox(ctx, amount: int, members: commands.Greedy[discord.Member]):
             
     # 4. Send the Admin Confirmation in Chat
     desc = f"{E_SUCCESS} Successfully added **{amount:,}** {E_ITEMBOX} PC Box(es) to **{success_count}** user(s)!"
-    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Box Transfer", desc, 0x3498db))
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Box Transfer", desc, 0x3498db))    
 
 @bot.hybrid_command(name="massaddsc", aliases=["masc"], description="Admin: Add Shiny Coins to multiple users.")
 @commands.has_permissions(administrator=True)
