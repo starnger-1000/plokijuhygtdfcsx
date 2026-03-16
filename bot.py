@@ -625,29 +625,36 @@ async def club_market_simulation_task():
     await bot.wait_until_ready()
     
     while not bot.is_closed():
-        # Wait 1 hour (3600 seconds) between each market shift
-        await asyncio.sleep(3600)
-        
-        clubs = list(db.clubs.find({}))
-        for club in clubs:
-            current_value = club.get("value", 1000000) # Fallback if missing
+        try:
+            # Wait 15 SECONDS for testing! (Change to 3600 when you are done)
+            await asyncio.sleep(15)
             
-            # Fluctuate between -8% and +10% (Slight upward bias to reward holding)
-            fluctuation_modifier = random.uniform(0.92, 1.10)
-            new_value = int(current_value * fluctuation_modifier)
+            # 👇 CHANGED THIS TO clubs_col TO MATCH YOUR BOT 👇
+            clubs = list(clubs_col.find({})) 
             
-            # Set a hard floor so a club never drops below $100k and becomes worthless
-            if new_value < 100000:
-                new_value = random.randint(100000, 150000)
+            for club in clubs:
+                current_value = club.get("value", 1000000)
                 
-           # Update the database and save the old value to track trends!
-            db.clubs.update_one(
-                {"_id": club["_id"]},
-                {"$set": {
-                    "value": new_value,
-                    "previous_value": current_value 
-                }}
-            )
+                # Fluctuate between -8% and +10%
+                fluctuation_modifier = random.uniform(0.92, 1.10)
+                new_value = int(current_value * fluctuation_modifier)
+                
+                # Hard floor so a club never drops below $100k
+                if new_value < 100000:
+                    new_value = random.randint(100000, 150000)
+                    
+                # Update the database and save the old value for .trend
+                clubs_col.update_one(
+                    {"_id": club["_id"]},
+                    {"$set": {
+                        "value": new_value,
+                        "previous_value": current_value 
+                    }}
+                )
+                
+        except Exception as e:
+            # If it breaks, it will print exactly WHY in your terminal!
+            print(f"MARKET SIMULATION ERROR: {e}")
             
 class ParticipantView(discord.ui.View):
     def __init__(self, message_id, required_roles=None):
