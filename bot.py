@@ -166,8 +166,8 @@ else:
     db = cluster["auction_bot"]
 
 if db is not None:
-    clubs_col = db.clubs
-    duelists_col = db.duelists
+    clubs_col = clubs_col
+    duelists_col = duelists_col
     groups_col = db.investor_groups
     group_members_col = db.groups_members
     wallets_col = db.personal_wallets
@@ -190,7 +190,10 @@ if db is not None:
     message_counts_col = db.message_counts
     pending_shop_approvals = db.pending_shop_approvals # New collection for Shop Approvals
     quests_col = db.quests
-
+    contracts_col = db.contracts
+    pending_contracts_col = db.pending_contracts
+    pending_transfers_col = db.pending_transfers
+    
 def get_next_id(sequence_name):
     if db is None: return 0
     ret = counters_col.find_one_and_update(
@@ -410,7 +413,7 @@ class TransferBuyView(discord.ui.View):
             wallets_col.update_one({"user_id": str(self.old_club["owner_id"])}, {"$inc": {"balance": self.price}})
             
         # 3. Transfer the Duelist
-        db.duelists.update_one(
+        duelists_col.update_one(
             {"_id": self.duelist["_id"]}, 
             {"$set": {"club_id": self.buyer_club["_id"], "transfer_listed": False, "status": "Signed"}}
         )
@@ -539,7 +542,7 @@ class PayTaxView(discord.ui.View):
         current_due = self.club.get("tax_due_date", datetime.now())
         new_due = max(datetime.now(), current_due) + timedelta(days=30)
         
-        db.clubs.update_one({"_id": self.club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
+        clubs_col.update_one({"_id": self.club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
         
         # Disable buttons
         for child in self.children:
@@ -580,7 +583,7 @@ async def club_tax_alert_task():
     while not bot.is_closed():
         now = datetime.now()
         # Find all owned clubs
-        owned_clubs = db.clubs.find({"owner_id": {"$ne": None}})
+        owned_clubs = clubs_col.find({"owner_id": {"$ne": None}})
         
         for club in owned_clubs:
             due_date = club.get("tax_due_date")
@@ -592,7 +595,7 @@ async def club_tax_alert_task():
             
             # Check for Expiration (Disown Club)
             if hours_left <= 0:
-                db.clubs.update_one({"_id": club["_id"]}, {"$set": {"owner_id": None, "tax_due_date": None, "tax_reminder_stage": 0}})
+                clubs_col.update_one({"_id": club["_id"]}, {"$set": {"owner_id": None, "tax_due_date": None, "tax_reminder_stage": 0}})
                 try:
                     user = bot.get_user(int(club["owner_id"])) or await bot.fetch_user(int(club["owner_id"]))
                     desc = f"{E_DANGER} Your ownership of **{club['name']}** has been officially revoked because you failed to pay the required 25% club tax in time. \n\nThe club is now unsold and back on the public market."
@@ -615,7 +618,7 @@ async def club_tax_alert_task():
                         await user.send(embed=create_embed(f"{E_CROWN} Tax Reminder: {time_text} Left", desc, 0xf1c40f))
                     except: pass
                     
-                    db.clubs.update_one({"_id": club["_id"]}, {"$set": {"tax_reminder_stage": stage_num}})
+                    clubs_col.update_one({"_id": club["_id"]}, {"$set": {"tax_reminder_stage": stage_num}})
                     break # Only trigger one stage per loop cycle
 
         await asyncio.sleep(600) # Check the database every 10 minutes
@@ -892,6 +895,63 @@ async def on_message(message):
     # Notice how it is outdented all the way to the left so it runs no matter what.
     await bot.process_commands(message)
 
+async def check_login_reminders():
+    """Checks for expired login cooldowns and pings users."""
+    await bot.wait_until_ready()
+    
+    # FIX: Use the variable directly, do not use ["login_log"]
+    channel = bot.get_channel(LOGIN_LOG_CHANNEL_ID)
+    
+    if not channel:
+        print(f"[Warning] Login Log Channel (ID: {LOGIN_LOG_CHANNEL_ID}) not found.")
+    
+    while not bot.is_closed():
+        if channel:
+            now = datetime.now()
+            # Find users who:
+            # 1. Have reminders enabled
+            # 2. Have NOT been reminded yet for this cycle
+            # 3. Have a last_login date recorded
+            users = wallets_col.find({
+                "remind_login": True,
+                "reminder_sent": False, # This flag resets when they use .login
+                "last_login": {"$ne": None}
+            })
+
+            for user in users:
+                try:
+                    last_login = user["last_login"]
+                    # Ensure last_login is datetime
+                    if not isinstance(last_login, datetime): continue
+                    
+                    next_claim = last_login + timedelta(hours=24)
+                    
+                    # Check if time has passed
+                    if now >= next_claim:
+                        # OFFINE CATCH-UP LOGIC:
+                        # Only remind if the deadline passed within the last 12 hours.
+                        time_diff = now - next_claim
+                        if time_diff < timedelta(hours=12):
+                            # Construct Premium Embed
+                            embed = discord.Embed(
+                                title=f"{E_TIMER} Login Ready!",
+                                description=f"Your 24-hour cooldown has ended.\nUse `/login` now to keep your streak alive!",
+                                color=0x3498db
+                            )
+                            embed.add_field(name=f"{E_BOOST} Current Streak", value=f"**{user.get('login_streak', 0)} Days**", inline=True)
+                            embed.set_footer(text="Disable this via /remindlogin")
+                            if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
+
+                            # Send Ping + Embed
+                            await channel.send(content=f"<@{user['user_id']}>", embed=embed)
+
+                        # Mark as sent so we don't spam
+                        wallets_col.update_one({"_id": user["_id"]}, {"$set": {"reminder_sent": True}})
+                except Exception as e:
+                    print(f"[Reminder Loop Error] {e}")
+
+        await asyncio.sleep(60) # Check every minute
+
 # ==============================================================================
 #  DUELIST SYSTEM: CORE & EVENTS
 # ==============================================================================
@@ -908,13 +968,13 @@ def get_duelist(identifier):
 async def on_member_remove(member):
     # Auto-handle duelists leaving the server
     if db is None: return
-    duelist = db.duelists.find_one({"user_id": str(member.id)})
+    duelist = duelists_col.find_one({"user_id": str(member.id)})
     
     if duelist:
         club_id = duelist.get("club_id")
         if club_id:
             # Refund the club owner or group fund
-            club = db.clubs.find_one({"_id": club_id})
+            club = clubs_col.find_one({"_id": club_id})
             if club:
                 refund = duelist.get("last_purchase_price", 0)
                 owner_id = club.get("owner_id")
@@ -922,7 +982,7 @@ async def on_member_remove(member):
                     wallets_col.update_one({"user_id": owner_id}, {"$inc": {"balance": refund}})
                 
         # Update duelist status
-        db.duelists.update_one(
+        duelists_col.update_one(
             {"_id": duelist["_id"]}, 
             {"$set": {"status": "Left the Server", "club_id": None, "transfer_listed": False}}
         )
@@ -1979,7 +2039,7 @@ async def clubinfo(ctx, *, club_name_or_id: str):
 @bot.command(name="trend", aliases=["marketnews", "market"], description="View the live club market trends.")
 async def trend(ctx):
     # Fetch all clubs that have been processed by the simulation at least once
-    clubs = list(db.clubs.find({"previous_value": {"$exists": True}}))
+    clubs = list(clubs_col.find({"previous_value": {"$exists": True}}))
     
     if not clubs:
         return await ctx.send(embed=create_embed("Market Alert", f"{E_ALERT} The market simulation hasn't run yet. Check back in an hour!", 0xf1c40f))
@@ -2543,7 +2603,7 @@ async def taxinfo(ctx, *, club_name: str = None):
     if club_name:
         query["name"] = {"$regex": f"^{club_name}$", "$options": "i"}
         
-    clubs = list(db.clubs.find(query))
+    clubs = list(clubs_col.find(query))
     if not clubs:
         return await ctx.send(embed=create_embed("No Clubs Found", f"{E_ERROR} You don't own any clubs matching that name.", 0xff0000))
         
@@ -2572,7 +2632,7 @@ async def taxinfo(ctx, *, club_name: str = None):
 
 @bot.command(name="paytax", aliases=["ptx"], description="Pay the tax for your club.")
 async def paytax(ctx, *, club_name: str):
-    club = db.clubs.find_one({"owner_id": str(ctx.author.id), "name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    club = clubs_col.find_one({"owner_id": str(ctx.author.id), "name": {"$regex": f"^{club_name}$", "$options": "i"}})
     
     if not club:
         return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You don't own a club named **{club_name}**.", 0xff0000))
@@ -2593,14 +2653,14 @@ async def paytax(ctx, *, club_name: str):
 @bot.command(name="removetax", aliases=["rtx"], description="Admin: Waive tax for a club for 1 month.")
 @commands.has_permissions(administrator=True)
 async def removetax(ctx, *, club_name: str):
-    club = db.clubs.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
+    club = clubs_col.find_one({"name": {"$regex": f"^{club_name}$", "$options": "i"}})
     if not club or not club.get("owner_id"):
         return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Club not found or has no owner.", 0xff0000))
         
     current_due = club.get("tax_due_date", datetime.now())
     new_due = max(datetime.now(), current_due) + timedelta(days=30)
     
-    db.clubs.update_one({"_id": club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
+    clubs_col.update_one({"_id": club["_id"]}, {"$set": {"tax_due_date": new_due, "tax_reminder_stage": 0}})
     
     desc = f"{E_SUCCESS} Successfully waived tax for **{club['name']}**.\n{E_TIMER} **New Deadline:** <t:{int(new_due.timestamp())}:f>"
     await ctx.send(embed=create_embed(f"{E_ADMIN} Tax Waived", desc, 0x2ecc71))
@@ -2610,7 +2670,7 @@ async def removetax(ctx, *, club_name: str):
 @commands.has_permissions(administrator=True)
 async def unpaidtax(ctx):
     # Sort by tax due date ascending (closest to expiring first)
-    clubs = list(db.clubs.find({"owner_id": {"$ne": None}, "tax_due_date": {"$ne": None}}).sort("tax_due_date", 1))
+    clubs = list(clubs_col.find({"owner_id": {"$ne": None}, "tax_due_date": {"$ne": None}}).sort("tax_due_date", 1))
     
     if not clubs:
         return await ctx.send(embed=create_embed("All Good", f"{E_SUCCESS} No clubs have pending taxes.", 0x2ecc71))
@@ -2853,16 +2913,16 @@ async def battleresult(ctx, battle_id: int, winner_name: str):
 
     # --- DUELIST W/L MARKET UPDATE ---
     # Win: +1 Win, +1 Match, +$50k
-    db.duelists.update_many(
+    duelists_col.update_many(
         {"club_id": wc["_id"]}, 
         {"$inc": {"wins": 1, "matches": 1, "market_worth": 50000}}
     )
     
     # Loss: +1 Loss, +1 Match, -$50k (Minimum value $10k)
-    losing_duelists = db.duelists.find({"club_id": lc["_id"]})
+    losing_duelists = duelists_col.find({"club_id": lc["_id"]})
     for d in losing_duelists:
         new_worth = max(10000, d.get("market_worth", 100000) - 50000)
-        db.duelists.update_one(
+        duelists_col.update_one(
             {"_id": d["_id"]}, 
             {"$inc": {"losses": 1, "matches": 1}, "$set": {"market_worth": new_worth}}
         )
@@ -3056,7 +3116,7 @@ async def massbox(ctx, amount: int, members: commands.Greedy[discord.Member]):
 @bot.command(name="ucl", description="Admin: Award a UCL trophy to a club.")
 @commands.has_permissions(administrator=True)
 async def ucl(ctx, *, club_name: str):
-    club = db.clubs.find_one_and_update(
+    club = clubs_col.find_one_and_update(
         {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
         {"$inc": {"t_ucl": 1}},
         return_document=ReturnDocument.AFTER
@@ -3067,7 +3127,7 @@ async def ucl(ctx, *, club_name: str):
 @bot.command(name="league", description="Admin: Award a League title to a club.")
 @commands.has_permissions(administrator=True)
 async def league(ctx, *, club_name: str):
-    club = db.clubs.find_one_and_update(
+    club = clubs_col.find_one_and_update(
         {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
         {"$inc": {"t_league": 1}},
         return_document=ReturnDocument.AFTER
@@ -3078,7 +3138,7 @@ async def league(ctx, *, club_name: str):
 @bot.command(name="supercup", description="Admin: Award a Super Cup to a club.")
 @commands.has_permissions(administrator=True)
 async def supercup(ctx, *, club_name: str):
-    club = db.clubs.find_one_and_update(
+    club = clubs_col.find_one_and_update(
         {"name": {"$regex": f"^{club_name}$", "$options": "i"}},
         {"$inc": {"t_supercup": 1}},
         return_document=ReturnDocument.AFTER
@@ -4483,7 +4543,7 @@ async def duelistinfo(ctx, identifier: str = None):
         if not duelist:
             return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} Duelist not found. Ensure they are registered.", 0xff0000))
     else:
-        duelist = db.duelists.find_one({"user_id": str(ctx.author.id)})
+        duelist = duelists_col.find_one({"user_id": str(ctx.author.id)})
         if not duelist:
             return await ctx.send(embed=create_embed("Not Registered", f"{E_ERROR} You are not registered as a duelist.", 0xff0000))
 
@@ -4492,7 +4552,7 @@ async def duelistinfo(ctx, identifier: str = None):
 
     club_name = "Free Agent"
     if duelist.get("club_id"):
-        club = db.clubs.find_one({"_id": duelist["club_id"]})
+        club = clubs_col.find_one({"_id": duelist["club_id"]})
         if club: club_name = club["name"]
 
    # Fetch wallet for Ballon d'Or stats
@@ -4523,7 +4583,7 @@ async def duelistinfo(ctx, identifier: str = None):
 
 @bot.command(name="duelistleaderboard", aliases=["dlb"], description="View top duelists by market worth.")
 async def duelistleaderboard(ctx):
-    duelists = list(db.duelists.find({"status": {"$ne": "Left the Server"}}).sort("market_worth", -1).limit(50))
+    duelists = list(duelists_col.find({"status": {"$ne": "Left the Server"}}).sort("market_worth", -1).limit(50))
     if not duelists: return await ctx.send("No duelists registered.")
         
     data = []
@@ -4541,7 +4601,7 @@ async def duelistleaderboard(ctx):
 async def battledrew(ctx, battle_id: str):
     # Fetch battle and clubs involved (Assuming you have a battles collection)
     # Give +1 Draw, +1 Match, +$25k to all duelists in both clubs
-    db.duelists.update_many(
+    duelists_col.update_many(
         {"club_id": {"$in": ["CLUB_1_ID_HERE", "CLUB_2_ID_HERE"]}}, # Replace with actual logic to fetch clubs from battle
         {"$inc": {"draws": 1, "matches": 1, "market_worth": 25000}}
     )
@@ -4554,7 +4614,7 @@ async def battlemvp(ctx, battle_id: str, duelist_identifier: str):
     duelist = get_duelist(duelist_identifier)
     if not duelist: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Duelist not found.", 0xff0000))
         
-    db.duelists.update_one({"_id": duelist["_id"]}, {"$inc": {"mvps": 1, "market_worth": 100000}})
+    duelists_col.update_one({"_id": duelist["_id"]}, {"$inc": {"mvps": 1, "market_worth": 100000}})
     await ctx.send(embed=create_embed("MVP Awarded", f"{E_STARS} <@{duelist['user_id']}> awarded MVP for Battle `{battle_id}`! Market worth increased by $100k.", 0xf1c40f))
 
 
@@ -4564,7 +4624,7 @@ async def removeduelist(ctx, duelist_identifier: str):
     duelist = get_duelist(duelist_identifier)
     if not duelist: return await ctx.send("Duelist not found.")
         
-    db.duelists.update_one({"_id": duelist["_id"]}, {"$set": {"club_id": None, "status": "Free Agent"}})
+    duelists_col.update_one({"_id": duelist["_id"]}, {"$set": {"club_id": None, "status": "Free Agent"}})
     await ctx.send(embed=create_embed("Duelist Removed", f"{E_SUCCESS} <@{duelist['user_id']}> is now a Free Agent.", 0x2ecc71))
 
 
@@ -4574,7 +4634,7 @@ async def deleteduelist(ctx, duelist_identifier: str):
     duelist = get_duelist(duelist_identifier)
     if not duelist: return await ctx.send("Duelist not found.")
         
-    db.duelists.delete_one({"_id": duelist["_id"]})
+    duelists_col.delete_one({"_id": duelist["_id"]})
     await ctx.send(embed=create_embed("Profile Erased", f"{E_SUCCESS} Duelist profile for <@{duelist['user_id']}> has been completely wiped from the database.", 0xff0000))
 
 @bot.hybrid_command(name="setoffline", aliases=["leftserver", "markleft"], description="Admin: Manually mark a duelist as 'Left the Server' and refund their club.")
@@ -4593,7 +4653,7 @@ async def setoffline(ctx, duelist_identifier: str):
     
     # Process Club Refund if they were signed
     if club_id:
-        club = db.clubs.find_one({"_id": club_id}) or db.clubs.find_one({"id": club_id})
+        club = clubs_col.find_one({"_id": club_id}) or clubs_col.find_one({"id": club_id})
         if club:
             club_name = club.get('name', 'Unknown Club')
             # Refund their live market worth back to the owner
@@ -4608,7 +4668,7 @@ async def setoffline(ctx, duelist_identifier: str):
                     wallets_col.update_one({"user_id": str(owner_id)}, {"$inc": {"balance": refund_amount}})
                     
     # Update duelist status
-    db.duelists.update_one(
+    duelists_col.update_one(
         {"_id": duelist["_id"]}, 
         {"$set": {"status": "Left the Server", "club_id": None, "transfer_listed": False}}
     )
@@ -4631,18 +4691,18 @@ async def setoffline(ctx, duelist_identifier: str):
 
 @bot.command(name="requesttransfer", aliases=["rtransfer", "rt"], description="Request to be added to the Transfer Market.")
 async def requesttransfer(ctx):
-    duelist = db.duelists.find_one({"user_id": str(ctx.author.id)})
+    duelist = duelists_col.find_one({"user_id": str(ctx.author.id)})
     if not duelist: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You are not a registered duelist.", 0xff0000))
         
     current_status = duelist.get("transfer_listed", False)
-    db.duelists.update_one({"_id": duelist["_id"]}, {"$set": {"transfer_listed": not current_status}})
+    duelists_col.update_one({"_id": duelist["_id"]}, {"$set": {"transfer_listed": not current_status}})
     
     status_msg = "ADDED TO" if not current_status else "REMOVED FROM"
     await ctx.send(embed=create_embed("Transfer Market", f"{E_SUCCESS} You have been **{status_msg}** the Transfer Market.", 0x2ecc71))
 
 @bot.command(name="transfermarket", aliases=["tm"], description="View duelists seeking a transfer.")
 async def transfermarket(ctx):
-    duelists = list(db.duelists.find({"transfer_listed": True}))
+    duelists = list(duelists_col.find({"transfer_listed": True}))
     if not duelists: return await ctx.send(embed=create_embed("Transfer Market", f"{E_ERROR} The transfer market is currently empty.", 0x95a5a6))
         
     data = []
@@ -4656,7 +4716,7 @@ async def transfermarket(ctx):
 
 @bot.command(name="transferbuy", aliases=["tb"], description="Club Owner: Buy a duelist from the transfer market.")
 async def transferbuy(ctx, duelist_id: str):
-    buyer_club = db.clubs.find_one({"owner_id": str(ctx.author.id)})
+    buyer_club = clubs_col.find_one({"owner_id": str(ctx.author.id)})
     if not buyer_club: return await ctx.send(embed=create_embed("Error", f"{E_ERROR} You must own a club to buy a duelist.", 0xff0000))
         
     duelist = get_duelist(duelist_id)
@@ -4664,7 +4724,7 @@ async def transferbuy(ctx, duelist_id: str):
         return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Duelist not found or not on the transfer market.", 0xff0000))
         
     price = duelist.get("market_worth", 100000)
-    old_club = db.clubs.find_one({"_id": duelist["club_id"]}) if duelist.get("club_id") else None
+    old_club = clubs_col.find_one({"_id": duelist["club_id"]}) if duelist.get("club_id") else None
     
     # Send UI to Duelist
     try:
@@ -4679,7 +4739,7 @@ async def transferbuy(ctx, duelist_id: str):
 @bot.command(name="contract", aliases=["signup"], description="Club Owner: Offer a contract to a duelist.")
 async def contract(ctx, duelist_identifier: str, seasons: int, role: str):
     """Usage: .contract @user 3 Crucial"""
-    club = db.clubs.find_one({"owner_id": str(ctx.author.id)})
+    club = clubs_col.find_one({"owner_id": str(ctx.author.id)})
     if not club: return await ctx.send("You don't own a club.")
         
     duelist = get_duelist(duelist_identifier)
@@ -4711,7 +4771,7 @@ async def contractinfo(ctx, duelist_identifier: str):
     cnt = db.contracts.find_one({"duelist_id": duelist["_id"]})
     if not cnt: return await ctx.send(embed=create_embed("No Contract", f"<@{duelist['user_id']}> does not have an active contract.", 0xff0000))
         
-    club = db.clubs.find_one({"_id": cnt["club_id"]})
+    club = clubs_col.find_one({"_id": cnt["club_id"]})
     club_name = club["name"] if club else "Unknown Club"
     
     desc = (
@@ -4734,7 +4794,7 @@ async def seasonend(ctx):
     
     # 3. Make them Free Agents & Delete contracts
     if expired_ids:
-        db.duelists.update_many({"_id": {"$in": expired_ids}}, {"$set": {"status": "Free Agent", "club_id": None}})
+        duelists_col.update_many({"_id": {"$in": expired_ids}}, {"$set": {"status": "Free Agent", "club_id": None}})
         db.contracts.delete_many({"_id": {"$in": [c["_id"] for c in expired]}})
         
     desc = f"{E_SUCCESS} The Season has officially ended!\nAll contracts have been reduced by 1 season.\n**{len(expired)}** duelists have finished their contracts and entered Free Agency."
@@ -4878,63 +4938,6 @@ async def remindlogin(ctx):
                          color)
     await ctx.send(embed=embed)
 
-async def check_login_reminders():
-    """Checks for expired login cooldowns and pings users."""
-    await bot.wait_until_ready()
-    
-    # FIX: Use the variable directly, do not use ["login_log"]
-    channel = bot.get_channel(LOGIN_LOG_CHANNEL_ID)
-    
-    if not channel:
-        print(f"[Warning] Login Log Channel (ID: {LOGIN_LOG_CHANNEL_ID}) not found.")
-    
-    while not bot.is_closed():
-        if channel:
-            now = datetime.now()
-            # Find users who:
-            # 1. Have reminders enabled
-            # 2. Have NOT been reminded yet for this cycle
-            # 3. Have a last_login date recorded
-            users = wallets_col.find({
-                "remind_login": True,
-                "reminder_sent": False, # This flag resets when they use .login
-                "last_login": {"$ne": None}
-            })
-
-            for user in users:
-                try:
-                    last_login = user["last_login"]
-                    # Ensure last_login is datetime
-                    if not isinstance(last_login, datetime): continue
-                    
-                    next_claim = last_login + timedelta(hours=24)
-                    
-                    # Check if time has passed
-                    if now >= next_claim:
-                        # OFFINE CATCH-UP LOGIC:
-                        # Only remind if the deadline passed within the last 12 hours.
-                        time_diff = now - next_claim
-                        if time_diff < timedelta(hours=12):
-                            # Construct Premium Embed
-                            embed = discord.Embed(
-                                title=f"{E_TIMER} Login Ready!",
-                                description=f"Your 24-hour cooldown has ended.\nUse `/login` now to keep your streak alive!",
-                                color=0x3498db
-                            )
-                            embed.add_field(name=f"{E_BOOST} Current Streak", value=f"**{user.get('login_streak', 0)} Days**", inline=True)
-                            embed.set_footer(text="Disable this via /remindlogin")
-                            if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
-
-                            # Send Ping + Embed
-                            await channel.send(content=f"<@{user['user_id']}>", embed=embed)
-
-                        # Mark as sent so we don't spam
-                        wallets_col.update_one({"_id": user["_id"]}, {"$set": {"reminder_sent": True}})
-                except Exception as e:
-                    print(f"[Reminder Loop Error] {e}")
-
-        await asyncio.sleep(60) # Check every minute
-
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -4949,6 +4952,7 @@ async def on_ready():
         bot.loop.create_task(pc_claim_alert_task())
         bot.loop.create_task(club_tax_alert_task())
         bot.loop.create_task(club_market_simulation_task()) # <-- The new live market!
+        bot.loop.create_task(check_login_reminders())
         
         # 2. Start Market Simulation (If not running)
         if not hasattr(bot, 'market_task_started'):
