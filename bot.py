@@ -623,7 +623,7 @@ async def club_tax_alert_task():
 
         await asyncio.sleep(600) # Check the database every 10 minutes
 
-@tasks.loop(seconds=15) # Runs exactly every 15 seconds!
+@tasks.loop(hours=1) # Runs exactly every 15 seconds!
 async def club_market_simulation_task():
     """Background loop to fluctuate club values."""
     try:
