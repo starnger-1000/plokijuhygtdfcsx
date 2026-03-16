@@ -18,7 +18,7 @@ from fastapi import FastAPI
 import uvicorn
 import threading
 import typing
-
+from discord.ext import tasks
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -623,42 +623,45 @@ async def club_tax_alert_task():
 
         await asyncio.sleep(600) # Check the database every 10 minutes
 
+@tasks.loop(seconds=15) # Runs exactly every 15 seconds!
 async def club_market_simulation_task():
-    """Background loop to fluctuate club values every hour automatically."""
+    """Background loop to fluctuate club values."""
+    try:
+        clubs = list(clubs_col.find({})) 
+        if not clubs:
+            print("Market Loop: No clubs found in database yet.")
+            return
+
+        for club in clubs:
+            current_value = club.get("value", 1000000)
+            
+            # Fluctuate between -8% and +10%
+            fluctuation_modifier = random.uniform(0.92, 1.10)
+            new_value = int(current_value * fluctuation_modifier)
+            
+            # Hard floor so a club never drops below $100k
+            if new_value < 100000:
+                new_value = random.randint(100000, 150000)
+                
+            # Update the database
+            clubs_col.update_one(
+                {"_id": club["_id"]},
+                {"$set": {
+                    "value": new_value,
+                    "previous_value": current_value 
+                }}
+            )
+        print("Market Loop: Successfully updated club prices!")
+            
+    except Exception as e:
+        print(f"MARKET SIMULATION ERROR: {e}")
+        
+@club_market_simulation_task.before_loop
+async def before_market_loop():
     await bot.wait_until_ready()
-    
-    while not bot.is_closed():
-        try:
-            # Wait 15 SECONDS for testing! (Change to 3600 when you are done)
-            await asyncio.sleep(15)
-            
-            # 👇 CHANGED THIS TO clubs_col TO MATCH YOUR BOT 👇
-            clubs = list(clubs_col.find({})) 
-            
-            for club in clubs:
-                current_value = club.get("value", 1000000)
-                
-                # Fluctuate between -8% and +10%
-                fluctuation_modifier = random.uniform(0.92, 1.10)
-                new_value = int(current_value * fluctuation_modifier)
-                
-                # Hard floor so a club never drops below $100k
-                if new_value < 100000:
-                    new_value = random.randint(100000, 150000)
-                    
-                # Update the database and save the old value for .trend
-                clubs_col.update_one(
-                    {"_id": club["_id"]},
-                    {"$set": {
-                        "value": new_value,
-                        "previous_value": current_value 
-                    }}
-                )
-                
-        except Exception as e:
-            # If it breaks, it will print exactly WHY in your terminal!
-            print(f"MARKET SIMULATION ERROR: {e}")
-            
+
+#AND THEN IN YOUR on_ready() EVENT, START IT LIKE THIS:
+# club_market_simulation_task.start()            
 class ParticipantView(discord.ui.View):
     def __init__(self, message_id, required_roles=None):
         super().__init__(timeout=None)
@@ -4951,8 +4954,9 @@ async def on_ready():
         
         bot.loop.create_task(pc_claim_alert_task())
         bot.loop.create_task(club_tax_alert_task())
-        bot.loop.create_task(club_market_simulation_task()) # <-- The new live market!
-        bot.loop.create_task(check_login_reminders())
+        bot.loop.create_task(check_active_giveaways())# 3. START GIVEAWAY RECOVERY (The Fix)
+        
+        club_market_simulation_task.start()
         
         # 2. Start Market Simulation (If not running)
         if not hasattr(bot, 'market_task_started'):
