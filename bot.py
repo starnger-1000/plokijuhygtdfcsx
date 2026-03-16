@@ -626,7 +626,7 @@ async def club_market_simulation_task():
     
     while not bot.is_closed():
         # Wait 1 hour (3600 seconds) between each market shift
-        await asyncio.sleep(15)
+        await asyncio.sleep(3600)
         
         clubs = list(db.clubs.find({}))
         for club in clubs:
