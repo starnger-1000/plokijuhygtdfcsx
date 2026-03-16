@@ -166,8 +166,8 @@ else:
     db = cluster["auction_bot"]
 
 if db is not None:
-    clubs_col = clubs_col
-    duelists_col = duelists_col
+    clubs_col = db.clubs
+    duelists_col = db.duelists
     groups_col = db.investor_groups
     group_members_col = db.groups_members
     wallets_col = db.personal_wallets
