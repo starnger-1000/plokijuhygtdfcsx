@@ -19,6 +19,8 @@ import uvicorn
 import threading
 import typing
 from discord.ext import tasks
+import re
+from datetime import datetime, timezone
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -193,6 +195,7 @@ if db is not None:
     contracts_col = db.contracts
     pending_contracts_col = db.pending_contracts
     pending_transfers_col = db.pending_transfers
+    deposits_col = db.deposits
     
 def get_next_id(sequence_name):
     if db is None: return 0
@@ -246,6 +249,53 @@ class HumanInt(commands.Converter):
             if "b" in clean: return int(float(clean.replace("b", "")) * 1000000000)
             return int(clean)
         except: raise commands.BadArgument(f"Invalid number: {argument}")
+
+class DepositModal(discord.ui.Modal, title="Deposit Pokécoins"):
+    amount = discord.ui.TextInput(
+        label="Amount of PC to Deposit", 
+        placeholder="e.g. 150000", 
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            pc_amount = int(self.amount.value.replace(",", ""))
+        except ValueError:
+            return await interaction.response.send_message(embed=create_embed("Invalid", f"{E_ERROR} Please enter a valid number.", 0xff0000), ephemeral=True)
+
+        if pc_amount <= 0:
+            return await interaction.response.send_message(embed=create_embed("Invalid", f"{E_ERROR} Amount must be greater than 0.", 0xff0000), ephemeral=True)
+
+        # Generate custom ID (dpc1, dpc2, etc.)
+        deposit_count = deposits_col.count_documents({}) + 1
+        dep_id = f"dpc{deposit_count}"
+
+        # Save to Database
+        new_deposit = {
+            "deposit_id": dep_id,
+            "user_id": str(interaction.user.id),
+            "amount": pc_amount,
+            "status": "Queued",
+            "market_id": None,
+            "created_at": datetime.now(timezone.utc),
+            "listed_at": None
+        }
+        deposits_col.insert_one(new_deposit)
+
+        await interaction.response.send_message(embed=create_embed("Deposit Queued", f"{E_SUCCESS} Deposit request for **{pc_amount:,} PC** queued (ID: `{dep_id}`).\n\nPlease wait in your DMs for the Market ID.", 0x2ecc71), ephemeral=True)
+
+        # Send command to the market channel
+        market_channel = interaction.client.get_channel(1483437925139218613)
+        if market_channel:
+            await market_channel.send(f"&say <@716390085896962058> m a l {pc_amount}")
+
+class DepositView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Deposit PC", style=discord.ButtonStyle.green, custom_id="dep_pc_btn")
+    async def deposit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DepositModal())
 
 # ==============================================================================
 #  PC WITHDRAWAL SYSTEM
@@ -661,7 +711,8 @@ async def before_market_loop():
     await bot.wait_until_ready()
 
 #AND THEN IN YOUR on_ready() EVENT, START IT LIKE THIS:
-# club_market_simulation_task.start()            
+# club_market_simulation_task.start()     
+    
 class ParticipantView(discord.ui.View):
     def __init__(self, message_id, required_roles=None):
         super().__init__(timeout=None)
@@ -897,6 +948,93 @@ async def on_message(message):
     # 3. CRITICAL: This line tells the bot to actually read your commands!
     # Notice how it is outdented all the way to the left so it runs no matter what.
     await bot.process_commands(message)
+
+@bot.listen('on_message')
+async def auto_deposit_listener(message):
+    if message.channel.id != 1483437925139218613:
+        return
+
+    # 1. Listen for the Bot listing the Pokemon
+    if message.author.id == 716390085896962058: # Poketwo ID
+        if "Listed your" in message.content and "on the market for" in message.content:
+            match = re.search(r"for \*\*([\d,]+)\*\* Pokécoins \(Listing #(\d+)\)", message.content)
+            if match:
+                amount = int(match.group(1).replace(",", ""))
+                market_id = match.group(2)
+
+                # Find the oldest queued deposit for this amount
+                deposit = deposits_col.find_one({"status": "Queued", "amount": amount}, sort=[("created_at", 1)])
+                if deposit:
+                    deposits_col.update_one(
+                        {"_id": deposit["_id"]},
+                        {"$set": {"status": "On Hold", "market_id": market_id, "listed_at": datetime.now(timezone.utc)}}
+                    )
+                    
+                    user = bot.get_user(int(deposit["user_id"]))
+                    if user:
+                        td = datetime.now(timezone.utc) - deposit["created_at"].replace(tzinfo=timezone.utc)
+                        time_taken = f"{int(td.total_seconds())} seconds"
+                        
+                        desc = (
+                            f"Your deposit request `#{deposit['deposit_id']}` is ready.\n\n"
+                            f"**Amount:** {amount:,} PC\n"
+                            f"**Market ID:** `{market_id}`\n"
+                            f"**Bot processing time:** {time_taken}\n\n"
+                            f"⚠️ **Please buy this exact listing on the market to complete your deposit.** Do not buy any other listing."
+                        )
+                        try:
+                            await user.send(embed=create_embed("Market ID Ready", desc, 0x3498db))
+                        except discord.Forbidden:
+                            pass # User has DMs closed
+
+    # 2. Listen for the User buying the Pokemon
+    if message.author.id == 716390085896962058 and f"<@{bot.user.id}>" in message.content:
+        if "Someone purchased your" in message.content and "You received" in message.content:
+            match = re.search(r"You received ([\d,]+) Pokécoins!", message.content)
+            if match:
+                amount = int(match.group(1).replace(",", ""))
+
+                # Find oldest 'On Hold' deposit for this amount
+                deposit = deposits_col.find_one({"status": "On Hold", "amount": amount}, sort=[("listed_at", 1)])
+                if deposit:
+                    deposits_col.update_one(
+                        {"_id": deposit["_id"]},
+                        {"$set": {"status": "Completed"}}
+                    )
+                    
+                    # Add money to user
+                    wallets_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"pc": amount}}, upsert=True)
+
+                    user = bot.get_user(int(deposit["user_id"]))
+                    username = user.name if user else "Unknown User"
+                    
+                    td = datetime.now(timezone.utc) - deposit["created_at"].replace(tzinfo=timezone.utc)
+                    total_time = f"{int(td.total_seconds() // 60)}m {int(td.total_seconds() % 60)}s"
+
+                    if user:
+                        try:
+                            dm_desc = (
+                                f"{E_SUCCESS} Your deposit of **{amount:,} PC** (ID: `{deposit['deposit_id']}`) is fully confirmed!\n\n"
+                                f"💰 The PC has been automatically added to your bot account.\n"
+                                f"ℹ️ Deposited PC can be withdrawn at any time and can be used in `.shop` or PokéTwo auctions hosted by Ze Bot."
+                            )
+                            await user.send(embed=create_embed("Deposit Confirmed", dm_desc, 0x2ecc71))
+                        except discord.Forbidden:
+                            pass
+
+                    # Final Log to the Logging Channel
+                    log_channel = bot.get_channel(1483526389339521066)
+                    if log_channel:
+                        log_desc = (
+                            f"**Deposit ID:** `{deposit['deposit_id']}`\n"
+                            f"**User:** <@{deposit['user_id']}> ({username})\n"
+                            f"**Amount:** {amount:,} PC\n"
+                            f"**Market ID:** `{deposit.get('market_id', 'Unknown')}`\n"
+                            f"**Total Time:** {total_time}\n"
+                            f"**Status:** {E_SUCCESS} Successfully added PC"
+                        )
+                        embed = discord.Embed(title="Deposit Log: Completed", description=log_desc, color=0x2ecc71, timestamp=datetime.now(timezone.utc))
+                        await log_channel.send(embed=embed)
 
 async def check_login_reminders():
     """Checks for expired login cooldowns and pings users."""
@@ -4426,6 +4564,76 @@ async def openbox(ctx, amount: int = 1):
     await ctx.send(embed=embed)
 
 # ===========================
+#   PC DEPOSIT    SYSTEM
+# ===========================
+
+@bot.command(name="depositpc", aliases=["dpc"])
+async def depositpc(ctx):
+    desc = "Click the button below to fill out the deposit form.\n\n⚠️ Ensure your DMs are open so the bot can send you the Market ID."
+    await ctx.send(embed=create_embed("Bank Deposit", desc, 0x3498db), view=DepositView())
+
+@bot.command(name="depositpcstatus", aliases=["dpcs"])
+async def depositpcstatus(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    deps = list(deposits_col.find({"user_id": str(target.id)}).sort("created_at", -1))
+    
+    if not deps:
+        return await ctx.send(embed=create_embed("No Deposits", f"{E_ERROR} No records found for {target.mention}.", 0xff0000))
+
+    total_pc = sum(d["amount"] for d in deps if d["status"] == "Completed")
+    desc = f"**Total Deposited:** {E_MONEY} **{total_pc:,} PC**\n\n**Recent Deposits:**\n"
+    
+    for d in deps[:5]: # Show last 5
+        status_emoji = E_SUCCESS if d["status"] == "Completed" else (E_ALERT if d["status"] == "On Hold" else "⏳")
+        td = datetime.now(timezone.utc) - d["created_at"].replace(tzinfo=timezone.utc)
+        elapsed = f"{int(td.total_seconds() // 60)}m {int(td.total_seconds() % 60)}s"
+        
+        desc += f"▫️ `{d['deposit_id']}` | **{d['amount']:,} PC** | {status_emoji} {d['status']} | Time: {elapsed}\n"
+
+    await ctx.send(embed=create_embed(f"Status: {target.display_name}", desc, 0x9b59b6))
+
+@bot.command(name="pendingdeposits", aliases=["pdpc"])
+@commands.has_permissions(administrator=True)
+async def pendingdeposits(ctx):
+    deps = list(deposits_col.find({"status": {"$in": ["Queued", "On Hold"]}}).sort("created_at", 1))
+    if not deps:
+        return await ctx.send(embed=create_embed("Queue Clear", f"{E_SUCCESS} There are no pending deposits.", 0x2ecc71))
+
+    desc = ""
+    for d in deps:
+        td = datetime.now(timezone.utc) - d["created_at"].replace(tzinfo=timezone.utc)
+        elapsed = f"{int(td.total_seconds() // 60)}m"
+        desc += f"`{d['deposit_id']}` | <@{d['user_id']}> | **{d['amount']:,} PC** | {d['status']} ({elapsed})\n"
+
+    await ctx.send(embed=create_embed("Pending Deposits", desc, 0xe67e22))
+
+@bot.command(name="logdepositpc")
+@commands.has_permissions(administrator=True)
+async def logdepositpc(ctx, deposit_id: str, status: str):
+    dep_id = deposit_id.lower()
+    stat = status.capitalize()
+    if stat not in ["Approved", "Rejected"]:
+        return await ctx.send(embed=create_embed("Error", "Status must be `approved` or `rejected`.", 0xff0000))
+        
+    deposit = deposits_col.find_one({"deposit_id": dep_id})
+    if not deposit: 
+        return await ctx.send(embed=create_embed("Error", "Deposit ID not found.", 0xff0000))
+
+    new_status = "Completed" if stat == "Approved" else "Rejected"
+    deposits_col.update_one({"deposit_id": dep_id}, {"$set": {"status": new_status}})
+
+    if stat == "Approved":
+        wallets_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"pc": deposit["amount"]}}, upsert=True)
+
+    # Log it
+    log_channel = bot.get_channel(1483526389339521066)
+    if log_channel:
+        embed = discord.Embed(title=f"Manual Log: {stat}", description=f"**ID:** `{dep_id}`\n**User:** <@{deposit['user_id']}>\n**Amount:** {deposit['amount']:,} PC", color=0x2ecc71 if stat == "Approved" else 0xff0000)
+        await log_channel.send(embed=embed)
+
+    await ctx.send(embed=create_embed("Success", f"Deposit `{dep_id}` manually marked as **{stat}**.", 0x2ecc71))
+
+# ===========================
 #   REWARDS & CODES SYSTEM
 # ===========================
 
@@ -4955,6 +5163,7 @@ async def on_ready():
         bot.loop.create_task(pc_claim_alert_task())
         bot.loop.create_task(club_tax_alert_task())
         bot.loop.create_task(check_active_giveaways())# 3. START GIVEAWAY RECOVERY (The Fix)
+        bot.add_view(DepositView())
         
         club_market_simulation_task.start()
         
