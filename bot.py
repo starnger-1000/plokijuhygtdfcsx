@@ -951,18 +951,25 @@ async def on_message(message):
 
 @bot.listen('on_message')
 async def auto_deposit_listener(message):
+    # Ignore messages outside the market channel
     if message.channel.id != 1483437925139218613:
         return
 
-    # 1. Listen for the Bot listing the Pokemon
-    if message.author.id == 716390085896962058: # Poketwo ID
+    # ==========================================================
+    # 1. LISTING THE POKEMON (Strictly PokéTwo Only)
+    # ==========================================================
+    if message.author.id == 716390085896962058: 
         if "Listed your" in message.content and "on the market for" in message.content:
-            match = re.search(r"for \*\*([\d,]+)\*\* Pokécoins \(Listing #(\d+)\)", message.content)
-            if match:
-                amount = int(match.group(1).replace(",", ""))
-                market_id = match.group(2)
+            print("[MARKET DEBUG] Detected a new market listing from PokéTwo!")
+            
+            match_amount = re.search(r"for \*\*([\d,]+)\*\* Pokécoins", message.content)
+            match_id = re.search(r"\(Listing #(\d+)\)", message.content)
+            
+            if match_amount and match_id:
+                amount = int(match_amount.group(1).replace(",", ""))
+                market_id = match_id.group(1)
+                print(f"[MARKET DEBUG] Success! Amount: {amount} | Market ID: {market_id}")
 
-                # Find the oldest queued deposit for this amount
                 deposit = deposits_col.find_one({"status": "Queued", "amount": amount}, sort=[("created_at", 1)])
                 if deposit:
                     deposits_col.update_one(
@@ -974,7 +981,6 @@ async def auto_deposit_listener(message):
                     if user:
                         td = datetime.now(timezone.utc) - deposit["created_at"].replace(tzinfo=timezone.utc)
                         time_taken = f"{int(td.total_seconds())} seconds"
-                        
                         desc = (
                             f"Your deposit request `#{deposit['deposit_id']}` is ready.\n\n"
                             f"**Amount:** {amount:,} PC\n"
@@ -984,58 +990,63 @@ async def auto_deposit_listener(message):
                         )
                         try:
                             await user.send(embed=create_embed("Market ID Ready", desc, 0x3498db))
+                            print("[MARKET DEBUG] Sent DM to user successfully.")
                         except discord.Forbidden:
-                            pass # User has DMs closed
+                            print("[MARKET DEBUG] ERROR: User has DMs closed.")
+                else:
+                    print("[MARKET DEBUG] Could not find a Queued deposit matching this amount.")
+            else:
+                print("[MARKET DEBUG] ERROR: Regex failed to extract amount or ID.")
 
-    # 2. Listen for the User buying the Pokemon
-    if message.author.id == 716390085896962058 and f"<@{bot.user.id}>" in message.content:
-        if "Someone purchased your" in message.content and "You received" in message.content:
-            match = re.search(r"You received ([\d,]+) Pokécoins!", message.content)
+
+    # ==========================================================
+    # 2. CONFIRMING THE PURCHASE (Listens to ANYONE!)
+    # ==========================================================
+    if "Someone purchased your" in message.content and "You received" in message.content:
+        # Check if Ze Bot is pinged in the message (either by Poketwo or a User)
+        if str(bot.user.id) in message.content or bot.user in message.mentions:
+            print(f"[MARKET DEBUG] Detected a purchase confirmation from {message.author.name}!")
+            
+            match = re.search(r"You received ([\d,]+) Pokécoins", message.content)
             if match:
                 amount = int(match.group(1).replace(",", ""))
+                print(f"[MARKET DEBUG] Success! Sold for: {amount}")
 
-                # Find oldest 'On Hold' deposit for this amount
                 deposit = deposits_col.find_one({"status": "On Hold", "amount": amount}, sort=[("listed_at", 1)])
                 if deposit:
+                    print(f"[MARKET DEBUG] Found matching On Hold deposit: {deposit['deposit_id']}")
                     deposits_col.update_one(
                         {"_id": deposit["_id"]},
                         {"$set": {"status": "Completed"}}
                     )
                     
-                    # Add money to user
                     wallets_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"pc": amount}}, upsert=True)
-
                     user = bot.get_user(int(deposit["user_id"]))
-                    username = user.name if user else "Unknown User"
                     
-                    td = datetime.now(timezone.utc) - deposit["created_at"].replace(tzinfo=timezone.utc)
-                    total_time = f"{int(td.total_seconds() // 60)}m {int(td.total_seconds() % 60)}s"
-
                     if user:
                         try:
-                            dm_desc = (
-                                f"{E_SUCCESS} Your deposit of **{amount:,} PC** (ID: `{deposit['deposit_id']}`) is fully confirmed!\n\n"
-                                f"💰 The PC has been automatically added to your bot account.\n"
-                                f"ℹ️ Deposited PC can be withdrawn at any time and can be used in `.shop` or PokéTwo auctions hosted by Ze Bot."
-                            )
+                            dm_desc = f"{E_SUCCESS} Your deposit of **{amount:,} PC** (ID: `{deposit['deposit_id']}`) is fully confirmed!\n💰 The PC has been added to your bot account."
                             await user.send(embed=create_embed("Deposit Confirmed", dm_desc, 0x2ecc71))
-                        except discord.Forbidden:
+                        except:
                             pass
 
-                    # Final Log to the Logging Channel
+                    # Log it! Now tracks WHO confirmed it.
                     log_channel = bot.get_channel(1483526389339521066)
                     if log_channel:
                         log_desc = (
                             f"**Deposit ID:** `{deposit['deposit_id']}`\n"
-                            f"**User:** <@{deposit['user_id']}> ({username})\n"
+                            f"**User:** <@{deposit['user_id']}>\n"
                             f"**Amount:** {amount:,} PC\n"
-                            f"**Market ID:** `{deposit.get('market_id', 'Unknown')}`\n"
-                            f"**Total Time:** {total_time}\n"
-                            f"**Status:** {E_SUCCESS} Successfully added PC"
+                            f"**Status:** {E_SUCCESS} Successfully added PC\n"
+                            f"**Confirmed By:** {message.author.mention}"
                         )
-                        embed = discord.Embed(title="Deposit Log: Completed", description=log_desc, color=0x2ecc71, timestamp=datetime.now(timezone.utc))
-                        await log_channel.send(embed=embed)
-
+                        await log_channel.send(embed=discord.Embed(title="Deposit Log: Completed", description=log_desc, color=0x2ecc71))
+                        print("[MARKET DEBUG] Log sent to admin channel. Process complete!")
+                else:
+                    print("[MARKET DEBUG] ERROR: Could not find an 'On Hold' deposit for this amount.")
+            else:
+                print("[MARKET DEBUG] ERROR: Regex failed to read the sold amount.")
+                
 async def check_login_reminders():
     """Checks for expired login cooldowns and pings users."""
     await bot.wait_until_ready()
