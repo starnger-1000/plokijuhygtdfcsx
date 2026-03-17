@@ -4580,8 +4580,28 @@ async def openbox(ctx, amount: int = 1):
 
 @bot.command(name="depositpc", aliases=["dpc"])
 async def depositpc(ctx):
+    # 1. The Lock Check (Defaults to True/Open if not touched)
+    if getattr(bot, 'deposits_open', True) is False:
+        desc = f"{E_ERROR} The PC deposit system is currently **closed**.\n\nPlease request a server Owner or Staff member to open it."
+        return await ctx.send(embed=create_embed("Deposits Offline", desc, 0xff0000))
+
+    # 2. The Normal Command (If Open)
     desc = "Click the button below to fill out the deposit form.\n\n⚠️ Ensure your DMs are open so the bot can send you the Market ID."
     await ctx.send(embed=create_embed("Bank Deposit", desc, 0x3498db), view=DepositView())
+    
+@bot.command(name="opendeposits")
+@commands.has_permissions(administrator=True)
+async def opendeposits(ctx):
+    bot.deposits_open = True # Flips the switch ON
+    desc = f"{E_SUCCESS} The PC deposit system has been successfully **OPENED**.\nUsers can now use `.dpc` again."
+    await ctx.send(embed=create_embed("System Opened", desc, 0x2ecc71))
+
+@bot.command(name="closedeposits")
+@commands.has_permissions(administrator=True)
+async def closedeposits(ctx):
+    bot.deposits_open = False # Flips the switch OFF
+    desc = f"{E_ALERT} The PC deposit system is now **CLOSED**.\nUsers will be blocked from using `.dpc` until reopened."
+    await ctx.send(embed=create_embed("System Closed", desc, 0xff0000))
 
 @bot.command(name="depositpcstatus", aliases=["dpcs"])
 async def depositpcstatus(ctx, member: discord.Member = None):
