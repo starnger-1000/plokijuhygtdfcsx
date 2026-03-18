@@ -1046,6 +1046,35 @@ async def auto_deposit_listener(message):
                     print("[MARKET DEBUG] ERROR: Could not find an 'On Hold' deposit for this amount.")
             else:
                 print("[MARKET DEBUG] ERROR: Regex failed to read the sold amount.")
+
+# ==========================================================
+# 🛑 ECONOMY KILL SWITCH SHIELD
+# ==========================================================
+@bot.check
+async def economy_lockdown_shield(ctx):
+    # If the switch is ON (default), let everything run normally
+    if getattr(bot, 'p2_economy_open', True):
+        return True
+        
+    # The master list of all PC/Economy commands and their aliases
+    locked_commands = [
+        "wallet", "bal", "balance",
+        "boxes", "box", "massbox", "mbox",
+        "profile", "p", "pr", "i", "I", "P",
+        "shop", "buy",
+        "depositpc", "dpc", "depositpcstatus", "dpcs", "pendingdeposits", "pdpc", "logdepositpc",
+        "withdrawpc", "withdraw", "wpc",
+        "lr", "loginreward", "daily"
+    ]
+    
+    # If the user tries to use ANY of those commands while the system is stopped...
+    if ctx.command:
+        if ctx.command.name in locked_commands or any(alias in locked_commands for alias in ctx.command.aliases):
+            # Silently cancel the command with ZERO response to the user
+            raise commands.CheckFailure("SilentEconomyLockdown")
+            
+    # If it's a club, duelist, or giveaway command, let it pass through!
+    return True
                 
 async def check_login_reminders():
     """Checks for expired login cooldowns and pings users."""
@@ -3260,6 +3289,33 @@ async def massbox(ctx, amount: int, members: commands.Greedy[discord.Member]):
     # 4. Send the Admin Confirmation in Chat
     desc = f"{E_SUCCESS} Successfully added **{amount:,}** {E_ITEMBOX} PC Box(es) to **{success_count}** user(s)!"
     await ctx.send(embed=create_embed(f"{E_ADMIN} Mass Box Transfer", desc, 0x3498db))    
+
+# ==========================================================
+# 🛑 ECONOMY MASTER SWITCHES
+# ==========================================================
+@bot.command(name="stopbotp2")
+@commands.has_permissions(administrator=True)
+async def stopbotp2(ctx):
+    bot.p2_economy_open = False # Flips the master switch OFF
+    
+    desc = (
+        f"{E_ALERT} **PokéTwo Economy Services Suspended**\n\n"
+        f"All PC features have been safely locked down. The bot will now completely ignore the following systems:\n"
+        f"▫️ Wallets & Profiles\n"
+        f"▫️ The `.shop` & PC Boxes\n"
+        f"▫️ PC Deposits & Withdrawals\n"
+        f"▫️ Login Rewards (`.lr`)\n\n"
+        f"*(Clubs, Duelists, Auctions, and Giveaways are still fully operational.)*"
+    )
+    await ctx.send(embed=create_embed("Economy Offline", desc, 0xff0000))
+
+@bot.command(name="openbotp2")
+@commands.has_permissions(administrator=True)
+async def openbotp2(ctx):
+    bot.p2_economy_open = True # Flips the master switch ON
+    
+    desc = f"{E_SUCCESS} **PokéTwo Economy Services Restored**\n\nAll PC, Shop, Wallet, and Deposit features are back online and accepting user commands."
+    await ctx.send(embed=create_embed("Economy Online", desc, 0x2ecc71))
 
 # ==============================================================================
 #  TROPHY AWARD COMMANDS (ADMIN ONLY)
