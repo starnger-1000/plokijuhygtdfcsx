@@ -20,7 +20,10 @@ import threading
 import typing
 from discord.ext import tasks
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import math
+import chat_exporter
+import io
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -196,6 +199,11 @@ if db is not None:
     pending_contracts_col = db.pending_contracts
     pending_transfers_col = db.pending_transfers
     deposits_col = db.deposits
+    auction_schedules_col = db.auction_schedules
+    auction_queue_col = db.auction_queue
+
+# Indian Standard Time (IST) setup
+IST = timezone(timedelta(hours=5, minutes=30))
     
 def get_next_id(sequence_name):
     if db is None: return 0
@@ -296,6 +304,489 @@ class DepositView(discord.ui.View):
     @discord.ui.button(label="Deposit PC", style=discord.ButtonStyle.green, custom_id="dep_pc_btn")
     async def deposit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DepositModal())
+
+# ==========================================
+# 🛑 POKEMON AUCTION SYSTEM
+# ==========================================
+
+class AuctionInfoView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        # Link button directly to the Registration Channel
+        url = f"https://discord.com/channels/{guild_id}/1483860214854844476"
+        self.add_item(discord.ui.Button(label="Go to Registration Channel", url=url, style=discord.ButtonStyle.link))
+
+class AuctionVoteView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=15.0) # 15 second voting timer
+        self.yes_votes = set()
+        self.no_votes = set()
+
+    @discord.ui.button(label="Yes, proceed", style=discord.ButtonStyle.green)
+    async def vote_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.yes_votes.add(interaction.user.id)
+        self.no_votes.discard(interaction.user.id)
+        await interaction.response.send_message(f"{E_SUCCESS} Vote cast: YES", ephemeral=True)
+
+    @discord.ui.button(label="No, skip", style=discord.ButtonStyle.danger)
+    async def vote_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.no_votes.add(interaction.user.id)
+        self.yes_votes.discard(interaction.user.id)
+        await interaction.response.send_message(f"{E_ERROR} Vote cast: NO", ephemeral=True)
+        
+@bot.listen('on_message')
+async def auction_registration_scanner(message):
+    # Ignore bots
+    if message.author.bot:
+        return
+
+    # Only listen in the Registration Channel
+    if message.channel.id == 1483860214854844476:
+        
+        # Only process if the registration window is officially OPEN
+        if getattr(bot, 'registration_active', False) is False:
+            return
+
+        # Check if the message matches: @PokéTwo i <number>
+        # ID for PokéTwo is 716390085896962058
+        match = re.match(r'^<@!?716390085896962058>\s+i\s+(\d+)$', message.content.strip(), re.IGNORECASE)
+        
+        if match:
+            pokemon_id = match.group(1)
+            user_id = message.author.id
+
+            # 1. Check Server Limit (Max 25 total)
+            total_entries = auction_queue_col.count_documents({})
+            if total_entries >= 25:
+                return # Block is full, silently ignore
+            
+            # 2. Check User Limit (Max 2 per user)
+            user_entries = auction_queue_col.count_documents({"user_id": user_id})
+            if user_entries >= 2:
+                return # User hit their limit, silently ignore
+
+            # 3. Success! Save to Database as Auc1, Auc2, etc.
+            auc_id = f"Auc{total_entries + 1}"
+            auction_queue_col.insert_one({
+                "auction_id": auc_id,
+                "pokemon_id": pokemon_id,
+                "user_id": user_id,
+                "status": "queued"
+            })
+            
+async def run_live_auction(bot, guild):
+    bidding_channel = guild.get_channel(1483860258932916336)
+    disputes_channel = guild.get_channel(1483860590907883580)
+    seller_role = guild.get_role(1483871103473553498)
+    
+    # Get all queued auctions
+    queue = list(auction_queue_col.find({"status": "queued"}))
+    total_slots = len(queue)
+    
+    if total_slots == 0:
+        return await bidding_channel.send(embed=create_embed("Auction Canceled", f"{E_ERROR} No Pokémon were registered today!", 0xff0000))
+
+    await bidding_channel.send(embed=create_embed("Live Auction Starting", f"{E_SUCCESS} The floor is open! We have **{total_slots}** Pokémon on the block today.", 0x2ecc71))
+
+    for index, item in enumerate(queue):
+        auc_id = item["auction_id"]
+        seller_id = item["user_id"]
+        pokemon_id = item["pokemon_id"]
+        seller = guild.get_member(seller_id)
+
+        # --- PHASE 3A: THE SUMMON ---
+        if seller:
+            await seller.add_roles(seller_role)
+        
+        summon_desc = (
+            f"**SELLER:** <@{seller_id}>\n\n"
+            f"You are up! Please spawn your registered Pokémon for the server to review.\n"
+            f"**Command:** `<@716390085896962058> i {pokemon_id}`\n\n"
+            f"*(You have 90 seconds to do this, or your slot will be skipped and you will be fined 2,000 PC!)*"
+        )
+        await bidding_channel.send(content=f"<@{seller_id}>", embed=create_embed(f"{E_ALERT} AUCTION QUEUE: SLOT {index+1}/{total_slots} (ID: {auc_id})", summon_desc, 0x3498db))
+        
+        # Wait for the seller to type the info command
+        def check_info(m):
+            return m.author.id == seller_id and m.channel.id == bidding_channel.id and f"i {pokemon_id}" in m.content.lower()
+
+        try:
+            info_msg = await bot.wait_for('message', timeout=90.0, check=check_info)
+        except asyncio.TimeoutError:
+            # Trap 1: AFK Seller Penalty
+            await bidding_channel.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Seller failed to info in 90s. Slot skipped.", 0xff0000))
+            if seller: await seller.remove_roles(seller_role)
+            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            await disputes_channel.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG: AFK SELLER", f"**User:** <@{seller_id}>\n**ID:** {auc_id}\n**Penalty:** 2,000 PC deducted.", 0xff0000))
+            continue
+
+        await asyncio.sleep(2)
+
+        # --- PHASE 3B: QUALITY CONTROL VOTE ---
+        await bidding_channel.set_permissions(guild.default_role, send_messages=False)
+        vote_view = AuctionVoteView()
+        
+        vote_desc = (
+            f"{E_ALERT} **To ensure maximum quality, the community must verify this Pokémon.**\n\n"
+            f"Please review the Pokémon above. Is this worth auctioning?\n"
+            f"*(You have 15 seconds to vote.)*"
+        )
+        vote_msg = await bidding_channel.send(embed=create_embed(f"{E_ALERT} VOTING PHASE - {auc_id}", vote_desc, 0xe67e22), view=vote_view)
+        
+        await vote_view.wait()
+        
+        yes_count = len(vote_view.yes_votes)
+        no_count = len(vote_view.no_votes)
+        
+        if no_count > yes_count:
+            # Trap 2: Trash Registration Penalty
+            await bidding_channel.send(embed=create_embed("Vote Failed", f"{E_ERROR} Community rejected this Pokémon. Slot skipped.", 0xff0000))
+            if seller: await seller.remove_roles(seller_role)
+            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            await disputes_channel.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG: FAILED VOTE", f"**User:** <@{seller_id}>\n**ID:** {auc_id}\n**Votes:** {yes_count} Yes / {no_count} No\n**Penalty:** 2,000 PC deducted.", 0xff0000))
+            continue
+
+        # --- PHASE 3C: THE BIDDING WAR ---
+        await bidding_channel.set_permissions(guild.default_role, send_messages=True)
+        await bidding_channel.send(embed=create_embed("Vote Passed!", f"{E_SUCCESS} The floor is open! Start placing your bids (e.g., `10k`, `1m`).", 0x2ecc71))
+
+        current_bid = 0
+        highest_bidder = None
+        min_increment = 0
+        tracker_msg = None
+
+        def check_bid(m):
+            if m.channel.id != bidding_channel.id or m.author.bot or m.author.id == seller_id:
+                return False
+            
+            content = m.content.lower().replace(",", "")
+            if not (content.endswith('k') or content.endswith('m')):
+                return False
+                
+            try:
+                multiplier = 1000 if content.endswith('k') else 1000000
+                bid_amount = int(float(content[:-1]) * multiplier)
+            except ValueError:
+                return False
+
+            if bid_amount < min_increment or bid_amount <= current_bid:
+                # Custom error reaction instead of default cross
+                bot.loop.create_task(m.add_reaction(E_ERROR))
+                return False
+
+            # Ghost Bank Check
+            user_wallet = db.wallets.find_one({"user_id": m.author.id})
+            balance = user_wallet.get("balance", 0) if user_wallet else 0
+            
+            if balance < bid_amount:
+                return False 
+                
+            m.valid_bid_amount = bid_amount
+            return True
+
+        # The Timer Loop
+        bidding_active = True
+        while bidding_active:
+            try:
+                # 30 Second Timer
+                bid_msg = await bot.wait_for('message', timeout=30.0, check=check_bid)
+                
+                current_bid = bid_msg.valid_bid_amount
+                highest_bidder = bid_msg.author.id
+                min_increment = int(current_bid * 1.025)
+                
+                # Custom success reaction instead of default checkmark
+                await bid_msg.add_reaction(E_SUCCESS)
+                
+                if tracker_msg:
+                    try: await tracker_msg.delete()
+                    except: pass
+                    
+                track_desc = f"{E_MONEY} **HIGHEST BID:** {current_bid:,} PC (<@{highest_bidder}>)\n\n{E_ALERT} **Next Minimum Bid:** `{min_increment:,} PC` *(+2.5%)*"
+                tracker_msg = await bidding_channel.send(embed=create_embed("Live Bid Tracker", track_desc, 0x3498db))
+                
+            except asyncio.TimeoutError:
+                if current_bid == 0:
+                    await bidding_channel.send(embed=create_embed("No Bids", f"{E_ALERT} No one bid on {auc_id}. Moving to next slot.", 0x95a5a6))
+                    bidding_active = False
+                    break
+                    
+                # 15 Second Warning
+                warn_desc = f"**<@{highest_bidder}>** holds the highest bid at **{current_bid:,} PC**!\nIf no higher bids are placed in the next **15 seconds**, the auction will close!"
+                await bidding_channel.send(embed=create_embed(f"{E_ALERT} GOING ONCE...", warn_desc, 0xe67e22))
+                
+                try:
+                    bid_msg = await bot.wait_for('message', timeout=15.0, check=check_bid)
+                    current_bid = bid_msg.valid_bid_amount
+                    highest_bidder = bid_msg.author.id
+                    min_increment = int(current_bid * 1.025)
+                    
+                    await bid_msg.add_reaction(E_SUCCESS)
+                    
+                    if tracker_msg:
+                        try: await tracker_msg.delete()
+                        except: pass
+                        
+                    track_desc = f"{E_MONEY} **HIGHEST BID:** {current_bid:,} PC (<@{highest_bidder}>)\n\n{E_ALERT} **Next Minimum Bid:** `{min_increment:,} PC` *(+2.5%)*"
+                    tracker_msg = await bidding_channel.send(embed=create_embed("Live Bid Tracker", track_desc, 0x3498db))
+                    
+                except asyncio.TimeoutError:
+                    await bidding_channel.send(embed=create_embed(f"{E_SUCCESS} SOLD!", f"Congratulations to <@{highest_bidder}> for winning **{auc_id}** for **{current_bid:,} PC**!", 0x2ecc71))
+                    bidding_active = False
+                    
+                    # Transition to Phase 4 (Escrow thread)
+                    await create_escrow_thread(bot, guild, auc_id, seller_id, highest_bidder, current_bid, pokemon_id)
+
+        # Clean up role for the next iteration
+        if seller: await seller.remove_roles(seller_role)
+        await bidding_channel.purge(limit=100)
+        await asyncio.sleep(5)
+
+async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_price, pokemon_id):
+    bidding_channel = guild.get_channel(1483860258932916336)
+    accept_logs = guild.get_channel(1483860540840214629)
+    disputes_logs = guild.get_channel(1483860590907883580)
+    typing_role = guild.get_role(1483871103473553498)
+
+    seller = guild.get_member(seller_id)
+    buyer = guild.get_member(buyer_id)
+
+    # 1. CREATE THE PRIVATE ESCROW THREAD
+    thread = await bidding_channel.create_thread(
+        name=f"Escrow: {auc_id}",
+        type=discord.ChannelType.private_thread,
+        invitable=False
+    )
+    
+    # 2. PULL USERS IN & ASSIGN ROLES
+    if seller:
+        await thread.add_user(seller)
+        await seller.add_roles(typing_role)
+    if buyer:
+        await thread.add_user(buyer)
+        await buyer.add_roles(typing_role)
+
+    desc = (
+        f"**Seller:** <@{seller_id}>\n"
+        f"**Buyer:** <@{buyer_id}>\n"
+        f"**Final Price:** {final_price:,} PC\n\n"
+        f"{E_ALERT} **Instructions for Seller:**\n"
+        f"1. Start trade: `<@716390085896962058> t <@{buyer_id}>`\n"
+        f"2. Add Pokémon: `<@716390085896962058> t a {pokemon_id}`\n"
+        f"3. Both confirm: `<@716390085896962058> t c`\n\n"
+        f"{E_MONEY} *Ze Bot will automatically deduct the PC from the Buyer and send it to the Seller once PokéTwo confirms. Do NOT add PC to the trade!*"
+    )
+    await thread.send(content=f"<@{seller_id}> <@{buyer_id}>", embed=create_embed(f"💼 OFFICIAL TRADE ROOM - {auc_id}", desc, 0x3498db))
+
+    def check_trade(m):
+        return m.channel.id == thread.id
+
+    trade_active = True
+    dispute_triggered = False
+    dispute_reason = ""
+    offender_id = None
+
+    # The 5-Minute Maximum Escrow Timer
+    end_time = asyncio.get_event_loop().time() + 300.0 
+
+    # 3. THE "EYE IN THE SKY" (Watching the chat)
+    while trade_active:
+        timeout_left = end_time - asyncio.get_event_loop().time()
+        if timeout_left <= 0:
+            # Trap 5: 5-Minute Time Waster (Buyer's fault for not confirming)
+            dispute_triggered = True
+            dispute_reason = "Trade Timeout (5 Minutes passed without confirmation)"
+            offender_id = buyer_id 
+            break
+
+        try:
+            msg = await bot.wait_for('message', timeout=timeout_left, check=check_trade)
+            content = msg.content.lower()
+
+            # Trap 3: Seller tries to Bait & Switch
+            if msg.author.id == seller_id and f"t r {pokemon_id}" in content:
+                dispute_triggered = True
+                dispute_reason = f"Bait & Switch (Removed Registered Pokémon {pokemon_id})"
+                offender_id = seller_id
+                break
+
+            # Trap 4: Someone manually aborts the trade
+            if "t x" in content and msg.author.id in [seller_id, buyer_id]:
+                dispute_triggered = True
+                dispute_reason = "Trade Aborted Manually"
+                offender_id = msg.author.id
+                break
+
+            # SUCCESS: PokéTwo confirms the trade is executing!
+            if msg.author.id == 716390085896962058 and "executing" in content:
+                trade_active = False
+                break
+
+        except asyncio.TimeoutError:
+            dispute_triggered = True
+            dispute_reason = "Trade Timeout (5 Minutes passed without confirmation)"
+            offender_id = buyer_id
+            break
+
+    # 4. GENERATE HTML TRANSCRIPT
+    transcript = await chat_exporter.export(thread)
+    transcript_file = discord.File(io.BytesIO(transcript.encode()), filename=f"transcript_{auc_id}.html")
+
+    # 5. RESOLUTION
+    if dispute_triggered:
+        # Penalize the troll
+        await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
+        db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
+        
+        log_desc = f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}\n**Penalty:** 2,000 PC deducted."
+        await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", log_desc, 0xff0000), file=transcript_file)
+    else:
+        # Transfer the funds!
+        db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
+        db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
+        
+        await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
+        
+        log_desc = f"**Pokémon ID:** `{pokemon_id}`\n**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Final Price:** {final_price:,} PC\n**Status:** {E_SUCCESS} Confirmed Trade"
+        await accept_logs.send(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id}", log_desc, 0x2ecc71), file=transcript_file)
+    
+    # 6. CLEANUP & LOCKDOWN
+    if seller: await seller.remove_roles(typing_role)
+    if buyer: await buyer.remove_roles(typing_role)
+    await asyncio.sleep(3) # Give Discord a second to process
+    await thread.edit(archived=True, locked=True)
+        
+async def execute_auction_protocol(bot):
+    guild = bot.guilds[0]
+    info_channel = guild.get_channel(1483860096415961188)
+    reg_channel = guild.get_channel(1483860214854844476)
+    
+    if not info_channel or not reg_channel:
+        return print("[AUCTION ERROR] Channels not found!")
+
+    # 0. PREP: Wipe the old queue from yesterday so we start fresh!
+    auction_queue_col.delete_many({})
+
+    # 1. THE ANNOUNCEMENT
+    desc = (
+        f"Welcome to the Ze Bot Premium Auction! The automated protocol has been engaged.\n\n"
+        f"{E_SUCCESS} **1. Registration**\n"
+        f"Want to sell a Pokémon? Click the button below to head to <#1483860214854844476>. "
+        f"The gates are locked, but will open in exactly **90 Seconds**!\n\n"
+        f"{E_ALERT} **2. Live Bidding**\n"
+        f"Once registered, all bidding happens in <#1483860258932916336>.\n\n"
+        f"{E_MONEY} **3. Bank Check**\n"
+        f"Ensure you have used `.depositpc`! You cannot bid what you don't have."
+    )
+    await info_channel.send(content="<@&1442917733422465024>")
+    await info_channel.send(embed=create_embed(f"{E_ALERT} THE POKÉMON AUCTION IS STARTING!", desc, 0xe67e22), view=AuctionInfoView(guild.id))
+
+    # 2. WAIT 90 SECONDS
+    await asyncio.sleep(90)
+
+    # 3. UNLOCK GATES & TURN SCANNER ON
+    bot.registration_active = True
+    await reg_channel.set_permissions(guild.default_role, send_messages=True)
+    
+    reg_desc = (
+        f"The gates are unlocked! You have exactly **5 Minutes** to submit your Pokémon.\n\n"
+        f"**How to submit:**\n"
+        f"Ping PokéTwo and type `i` followed by your Pokémon's ID.\n"
+        f"*Example:* `<@716390085896962058> i 2132`\n\n"
+        f"{E_ALERT} **The Rules:**\n"
+        f"▫️ Max **2 Pokémon** per user.\n"
+        f"▫️ The block only holds **25 Pokémon total**!"
+    )
+    await reg_channel.send(embed=create_embed(f"{E_SUCCESS} AUCTION REGISTRATION IS OPEN!", reg_desc, 0x2ecc71))
+
+    # 4. WAIT 5 MINUTES FOR REGISTRATION
+    await asyncio.sleep(300)
+
+    # 5. LOCK GATES & TURN SCANNER OFF
+    bot.registration_active = False
+    await reg_channel.set_permissions(guild.default_role, send_messages=False)
+    
+    # Check exactly how many Pokémon were successfully captured by the scanner
+    total_registered = auction_queue_col.count_documents({})
+    
+    lock_desc = (
+        f"The auction block is fully loaded and locked. No further entries will be accepted.\n\n"
+        f"📊 **Final Tally:** **{total_registered}/25** Pokémon successfully registered!\n\n"
+        f"The live bidding is about to begin. Grab your wallets and head to <#1483860258932916336>!"
+    )
+    await reg_channel.send(embed=create_embed(f"{E_ERROR} REGISTRATION CLOSED!", lock_desc, 0xff0000))
+    # Phase 3: Start the Live Bidding Engine!
+    bot.loop.create_task(run_live_auction(bot, guild))
+    
+    # (Phase 3: The Live Bidding Summon will trigger right here!)
+
+# Helper to parse time strings
+def parse_time(time_str):
+    try:
+        return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
+    except ValueError:
+        try:
+            return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
+        except ValueError:
+            return None
+
+@bot.command(name="scheduleauctions", aliases=["sauc"], description="Schedule a Pokémon auction (e.g., 14:30 or 2:30 PM).")
+@commands.has_permissions(administrator=True)
+async def scheduleauctions(ctx, *, time_str: str):
+    parsed_time = parse_time(time_str)
+    if not parsed_time:
+        return await ctx.send(embed=create_embed("Error", f"{E_ERROR} Invalid format! Use `HH:MM` or `HH:MM PM`.", 0xff0000))
+
+    if auction_schedules_col.count_documents({}) >= 6:
+        return await ctx.send(embed=create_embed("Limit Reached", f"{E_ERROR} You already have 6 schedules active.", 0xff0000))
+
+    if auction_schedules_col.find_one({"time": parsed_time}):
+        return await ctx.send(embed=create_embed("Duplicate", f"{E_ERROR} An auction is already scheduled for this time.", 0xff0000))
+
+    auction_schedules_col.insert_one({"time": parsed_time})
+    
+    # Build list of current schedules
+    times = sorted([doc["time"] for doc in auction_schedules_col.find()])
+    schedule_list = "\n".join([f"▫️ {datetime.strptime(t, '%H:%M').strftime('%I:%M %p')}" for t in times])
+    
+    desc = f"{E_SUCCESS} Auction scheduled daily at **{datetime.strptime(parsed_time, '%H:%M').strftime('%I:%M %p')} (IST)**.\n\n**Current Schedule:**\n{schedule_list}"
+    await ctx.send(embed=create_embed("Auction Scheduled", desc, 0x2ecc71))
+
+@bot.command(name="removescheduleauction", aliases=["rsauc"], description="Remove a scheduled auction time.")
+@commands.has_permissions(administrator=True)
+async def removescheduleauction(ctx, *, time_str: str):
+    parsed_time = parse_time(time_str)
+    result = auction_schedules_col.delete_one({"time": parsed_time})
+    
+    if result.deleted_count == 0:
+        return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} No schedule found for that time.", 0xff0000))
+        
+    await ctx.send(embed=create_embed("Schedule Removed", f"{E_SUCCESS} Successfully removed the **{time_str}** auction slot.", 0x2ecc71))
+
+@botcommand(name="forcepokemonauction", aliases=["fpa"], description="Instantly force start an auction protocol.")
+@commands.has_permissions(administrator=True)
+async def forcepokemonauction(ctx):
+    desc = f"{E_ALERT} **Auction Forced!**\nProtocol engaged. The auction ping has been dispatched to <#1483860096415961188>."
+    await ctx.send(embed=create_embed("Force Start", desc, 0x9b59b6))
+    
+    # Run the massive background protocol without blocking the bot
+    bot.loop.create_task(execute_auction_protocol(bot))
+
+# ==========================================================
+# ⏰ THE AUTOMATED BACKGROUND CLOCK (Checks every 1 minute)
+# ==========================================================
+@tasks.loop(minutes=1)
+async def auction_clock():
+    now_ist = datetime.now(IST).strftime("%H:%M")
+    
+    # Check if the exact current minute matches any saved schedule
+    if auction_schedules_col.find_one({"time": now_ist}):
+        print(f"[AUCTION] Scheduled time {now_ist} hit! Starting protocol...")
+        bot.loop.create_task(execute_auction_protocol(bot))
+
+@auction_clock.before_loop
+async def before_auction_clock():
+    await bot.wait_until_ready()
 
 # ==============================================================================
 #  PC WITHDRAWAL SYSTEM
@@ -5251,6 +5742,10 @@ async def on_ready():
         bot.loop.create_task(club_tax_alert_task())
         bot.loop.create_task(check_active_giveaways())# 3. START GIVEAWAY RECOVERY (The Fix)
         bot.add_view(DepositView())
+
+# Add these two new lines!
+    bot.add_view(AuctionInfoView(guild_id=824238712770003027)) # Put your actual Server ID here!
+    auction_clock.start()
         
         club_market_simulation_task.start()
         
