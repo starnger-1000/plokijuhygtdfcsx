@@ -871,7 +871,7 @@ async def auctionleaderboard(ctx):
     await ctx.send(embed=create_embed("ZE BOT AUCTION LEADERBOARD", desc, 0xf1c40f))
 
 
-@bot.command(name="auctionstatus", aliases=["as", "aucs"], description="Check the status of all current queued auctions.")
+@bot.command(name="auctionstatus", aliases=["aucs"], description="Check the status of all current queued auctions.")
 async def auctionstatus(ctx):
     queue = list(auction_queue_col.find({"status": "queued"}))
     if not queue:
