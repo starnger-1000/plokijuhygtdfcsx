@@ -1064,7 +1064,7 @@ async def economy_lockdown_shield(ctx):
         "shop", "buy",
         "depositpc", "dpc", "depositpcstatus", "dpcs", "pendingdeposits", "pdpc", "logdepositpc",
         "withdrawpc", "withdraw", "wpc",
-        "lr", "loginreward", "daily"
+        "lr", "loginreward", "ob" , "getpc", "cs", "claimstatus",
     ]
     
     # If the user tries to use ANY of those commands while the system is stopped...
