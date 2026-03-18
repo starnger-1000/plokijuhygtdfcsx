@@ -201,6 +201,8 @@ if db is not None:
     deposits_col = db.deposits
     auction_schedules_col = db.auction_schedules
     auction_queue_col = db.auction_queue
+    auction_stats_col = db.auction_stats
+    auction_history_col = db.auction_history
 
 # Indian Standard Time (IST) setup
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -340,6 +342,10 @@ async def auction_registration_scanner(message):
     if message.author.bot:
         return
 
+# Ban Role Check
+    if discord.utils.get(message.author.roles, id=1483904292078227707):
+        return # Silently ignore banned users
+    
     # Only listen in the Registration Channel
     if message.channel.id == 1483860214854844476:
         
@@ -494,6 +500,9 @@ async def run_live_auction(bot, guild):
                 current_bid = bid_msg.valid_bid_amount
                 highest_bidder = bid_msg.author.id
                 min_increment = int(current_bid * 1.025)
+
+                # Quest Hook: Add 1 valid bid to their profile
+                auction_stats_col.update_one({"user_id": highest_bidder}, {"$inc": {"bids_made": 1}}, upsert=True)
                 
                 # Custom success reaction instead of default checkmark
                 await bid_msg.add_reaction(E_SUCCESS)
@@ -631,24 +640,37 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
     # 4. GENERATE HTML TRANSCRIPT
     transcript = await chat_exporter.export(thread)
     transcript_file = discord.File(io.BytesIO(transcript.encode()), filename=f"transcript_{auc_id}.html")
-
-    # 5. RESOLUTION
+    
+# 5. RESOLUTION
+    # Send the log first so we can grab the message URL for the Admin HTML button!
     if dispute_triggered:
-        # Penalize the troll
+        log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000), file=transcript_file)
         await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
+        
+        # Stat updates for Disputer
         db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
+        auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
         
-        log_desc = f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}\n**Penalty:** 2,000 PC deducted."
-        await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", log_desc, 0xff0000), file=transcript_file)
+        # Save to History for .aucinfo
+        auction_history_col.insert_one({
+            "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, 
+            "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url
+        })
     else:
-        # Transfer the funds!
-        db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
-        db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
-        
+        log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71), file=transcript_file)
         await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
         
-        log_desc = f"**Pokémon ID:** `{pokemon_id}`\n**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Final Price:** {final_price:,} PC\n**Status:** {E_SUCCESS} Confirmed Trade"
-        await accept_logs.send(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id}", log_desc, 0x2ecc71), file=transcript_file)
+        # Stat updates for Buyer and Seller (Quests!)
+        db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
+        db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
+        auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
+        auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
+        
+        # Save to History for .aucinfo
+        auction_history_col.insert_one({
+            "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id,
+            "final_price": final_price, "status": "Confirmed", "log_url": log_msg.jump_url
+        })
     
     # 6. CLEANUP & LOCKDOWN
     if seller: await seller.remove_roles(typing_role)
@@ -787,6 +809,109 @@ async def auction_clock():
 @auction_clock.before_loop
 async def before_auction_clock():
     await bot.wait_until_ready()
+
+# ==========================================================
+# 📊 AUCTION STATS & UTILITY COMMANDS
+# ==========================================================
+
+@bot.command(name="auctionrules", aliases=["aucrule", "arule"], description="View the official Ze Bot Auction rules.")
+async def auctionrules(ctx):
+    desc = (
+        f"{E_ALERT} **OFFICIAL AUCTION RULES**\n\n"
+        f"**1. Registration:** Max 2 Pokémon per user. 25 slots total per auction.\n"
+        f"**2. Funds:** You must `.depositpc` before bidding. Fake bids are ignored.\n"
+        f"**3. The 2,000 PC Penalty:** You will be heavily fined if you:\n"
+        f"- Fail to info your Pokémon within 90s.\n"
+        f"- Submit a trash Pokémon that the community votes NO on.\n"
+        f"- Try to swap/remove the registered Pokémon from the trade.\n"
+        f"- Cancel the final trade or waste the 5-minute escrow timer."
+    )
+    await ctx.send(embed=create_embed("Ze Bot Premium Auctions", desc, 0x3498db))
+
+
+@bot.command(name="auctionprofile", aliases=["aucp"], description="View your or another user's auction stats.")
+async def auctionprofile(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    stats = auction_stats_col.find_one({"user_id": member.id}) or {}
+
+    desc = (
+        f"**The Hustler Stats**\n"
+        f"{E_MONEY} Total PC Earned: **{stats.get('pc_earned', 0):,} PC**\n"
+        f"{E_MONEY} Total PC Spent: **{stats.get('pc_spent', 0):,} PC**\n"
+        f"{E_ALERT} Most Expensive Auction: **{stats.get('highest_auc_id', 'None')}**\n\n"
+        f"**Auction History**\n"
+        f"- Bids Made: **{stats.get('bids_made', 0)}**\n"
+        f"- Auctions Won: **{stats.get('auctions_won', 0)}** | Lost: **{stats.get('auctions_lost', 0)}**\n"
+        f"- Pokémon Registered: **{stats.get('pokemon_registered', 0)}**\n"
+        f"- Confirmed Trades: **{stats.get('confirmed_trades', 0)}**\n"
+        f"- Disputes Caused: **{stats.get('disputes_caused', 0)}**\n"
+        f"- Penalties Paid: **{stats.get('penalties_paid', 0):,} PC**"
+    )
+    await ctx.send(embed=create_embed(f"AUCTION PROFILE: {member.display_name}", desc, 0x9b59b6))
+
+
+@bot.command(name="auctionleaderboard", aliases=["auclb"], description="View the top auction bidders and sellers.")
+async def auctionleaderboard(ctx):
+    # Get top 5 spenders
+    top_buyers = list(auction_stats_col.find().sort("pc_spent", -1).limit(5))
+    # Get top 5 earners
+    top_sellers = list(auction_stats_col.find().sort("pc_earned", -1).limit(5))
+
+    desc = f"{E_MONEY} **Top Bidders (PC Spent)**\n"
+    for i, user in enumerate(top_buyers):
+        if user.get("pc_spent", 0) > 0:
+            desc += f"{i+1}. <@{user['user_id']}> - {user.get('pc_spent'):,} PC\n"
+
+    desc += f"\n{E_SUCCESS} **Top Sellers (PC Earned)**\n"
+    for i, user in enumerate(top_sellers):
+        if user.get("pc_earned", 0) > 0:
+            desc += f"{i+1}. <@{user['user_id']}> - {user.get('pc_earned'):,} PC\n"
+
+    await ctx.send(embed=create_embed("ZE BOT AUCTION LEADERBOARD", desc, 0xf1c40f))
+
+
+@bot.command(name="auctionstatus", aliases=["as", "aucs"], description="Check the status of all current queued auctions.")
+async def auctionstatus(ctx):
+    queue = list(auction_queue_col.find({"status": "queued"}))
+    if not queue:
+        return await ctx.send(embed=create_embed("Auction Status", f"{E_ERROR} The auction block is currently empty.", 0xff0000))
+
+    desc = ""
+    for item in queue:
+        desc += f"- **{item['auction_id']}**: <@{item['user_id']}> (Poké ID: {item['pokemon_id']})\n"
+    
+    await ctx.send(embed=create_embed("Current Auction Queue", desc, 0x3498db))
+
+
+class AdminLogView(discord.ui.View):
+    def __init__(self, log_url):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="View HTML Transcript", url=log_url, style=discord.ButtonStyle.link))
+
+@bot.command(name="auctioninfo", aliases=["aucinfo"], description="Look up the receipt and details of a specific Auction ID.")
+async def auctioninfo(ctx, auc_id: str, mode: str = "user"):
+    history = auction_history_col.find_one({"auction_id": auc_id.capitalize()})
+    if not history:
+        return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} No records found for **{auc_id}**.", 0xff0000))
+
+    status_icon = E_SUCCESS if history['status'] == 'Confirmed' else E_ERROR
+    desc = (
+        f"**Pokémon ID:** `{history.get('pokemon_id', 'N/A')}`\n"
+        f"**Seller:** <@{history.get('seller_id', '0')}>\n"
+        f"**Buyer/Winner:** <@{history.get('buyer_id', '0')}>\n"
+        f"**Final Price:** {history.get('final_price', 0):,} PC\n"
+        f"**Status:** {status_icon} {history['status']}\n"
+    )
+    
+    if history.get('dispute_reason'):
+        desc += f"\n{E_ALERT} **Dispute Reason:** {history['dispute_reason']}"
+
+    # If Admin requests it, give them the HTML transcript link button
+    if mode.lower() == "admin" and ctx.author.guild_permissions.administrator:
+        log_url = history.get('log_url', 'https://discord.com')
+        await ctx.send(embed=create_embed(f"AUCTION RECEIPT: {auc_id} [ADMIN]", desc, 0x9b59b6), view=AdminLogView(log_url))
+    else:
+        await ctx.send(embed=create_embed(f"AUCTION RECEIPT: {auc_id}", desc, 0x3498db))
 
 # ==============================================================================
 #  PC WITHDRAWAL SYSTEM
