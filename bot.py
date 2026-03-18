@@ -785,7 +785,7 @@ async def removescheduleauction(ctx, *, time_str: str):
         
     await ctx.send(embed=create_embed("Schedule Removed", f"{E_SUCCESS} Successfully removed the **{time_str}** auction slot.", 0x2ecc71))
 
-@botcommand(name="forcepokemonauction", aliases=["fpa"], description="Instantly force start an auction protocol.")
+@bot.command(name="forcepokemonauction", aliases=["fpa"], description="Instantly force start an auction protocol.")
 @commands.has_permissions(administrator=True)
 async def forcepokemonauction(ctx):
     desc = f"{E_ALERT} **Auction Forced!**\nProtocol engaged. The auction ping has been dispatched to <#1483860096415961188>."
@@ -797,6 +797,7 @@ async def forcepokemonauction(ctx):
 # ==========================================================
 # ⏰ THE AUTOMATED BACKGROUND CLOCK (Checks every 1 minute)
 # ==========================================================
+    
 @tasks.loop(minutes=1)
 async def auction_clock():
     now_ist = datetime.now(IST).strftime("%H:%M")
