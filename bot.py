@@ -5867,10 +5867,6 @@ async def on_ready():
         bot.loop.create_task(club_tax_alert_task())
         bot.loop.create_task(check_active_giveaways())# 3. START GIVEAWAY RECOVERY (The Fix)
         bot.add_view(DepositView())
-
-# Add these two new lines!
-    bot.add_view(AuctionInfoView(guild_id=824238712770003027)) # Put your actual Server ID here!
-    auction_clock.start()
         
         club_market_simulation_task.start()
         
@@ -5889,6 +5885,10 @@ async def on_ready():
         bot.loop.create_task(check_active_giveaways())
         
     except Exception as e: print(e)
+
+# Paste them safely below the entire try/except block!
+    bot.add_view(AuctionInfoView(guild_id=824238712770003027))
+    auction_clock.start()
 
 @bot.event
 async def on_command_error(ctx, error):
