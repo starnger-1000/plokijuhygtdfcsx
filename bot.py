@@ -465,60 +465,53 @@ async def run_live_auction(bot, guild):
         min_increment = 0
         tracker_msg = None
 
+        # 1. NEW HELPER: Reads the bid cleanly
+        def get_bid_value(msg_content):
+            content = msg_content.lower().replace(",", "").replace("$", "").strip()
+            if "k" in content: return int(float(content.replace("k", "")) * 1000)
+            elif "m" in content: return int(float(content.replace("m", "")) * 1000000)
+            elif "b" in content: return int(float(content.replace("b", "")) * 1000000000)
+            return int(content)
+
+        # 2. FIXED CHECK BID (No more __slots__ crashes!)
         def check_bid(m):
             if m.channel.id != bidding_channel.id or m.author.bot or m.author.id == seller_id:
                 return False
-            
-            # Uses your HumanInt cleaning logic
-            content = m.content.lower().replace(",", "").replace("$", "").strip()
-            
+                
             try:
-                if "k" in content: bid_amount = int(float(content.replace("k", "")) * 1000)
-                elif "m" in content: bid_amount = int(float(content.replace("m", "")) * 1000000)
-                elif "b" in content: bid_amount = int(float(content.replace("b", "")) * 1000000000)
-                else: bid_amount = int(content)
+                bid_amount = get_bid_value(m.content)
             except ValueError:
                 return False
 
-            # MATH CHECK
             if bid_amount < min_increment or bid_amount <= current_bid:
                 bot.loop.create_task(m.add_reaction(E_ERROR))
-                bot.loop.create_task(m.reply(f"❌ Denied: Your bid must be at least **{min_increment:,} PC**.", delete_after=5))
+                bot.loop.create_task(m.reply(f"{E_ALERT} Denied: Your bid must be at least **{min_increment:,} PC**.", delete_after=5))
                 return False
 
-            # ==========================================
-            # BANK CHECK (Using your get_wallet helper!)
-            # ==========================================
             user_wallet = get_wallet(m.author.id) 
             pc_balance = user_wallet.get("pc", 0) if user_wallet else 0
             
             if pc_balance < bid_amount:
                 bot.loop.create_task(m.add_reaction(E_MONEY))
-                bot.loop.create_task(m.reply(f"❌ Denied: You only have **{pc_balance:,} PC** in your wallet.", delete_after=5))
+                bot.loop.create_task(m.reply(f"{E_ALERT} Denied: You only have **{pc_balance:,} PC**.", delete_after=5))
                 return False 
                 
-            # Valid bid!
-            m.valid_bid_amount = bid_amount
             return True
         
-        # The Timer Loop
+        # 3. FIXED BIDDING LOOP
         bidding_active = True
         while bidding_active:
             try:
-                # 30 Second Timer
                 bid_msg = await bot.wait_for('message', timeout=30.0, check=check_bid)
                 
-                current_bid = bid_msg.valid_bid_amount
+                # Recalculate the amount here safely!
+                current_bid = get_bid_value(bid_msg.content)
                 highest_bidder = bid_msg.author.id
                 min_increment = int(current_bid * 1.025)
 
-                # Quest Hook: Add 1 valid bid to their profile
                 auction_stats_col.update_one({"user_id": highest_bidder}, {"$inc": {"bids_made": 1}}, upsert=True)
-
-                # Update Native Quest System
                 await update_quest(highest_bidder, "auc_bid", 1)
                 
-                # Custom success reaction instead of default checkmark
                 await bid_msg.add_reaction(E_SUCCESS)
                 
                 if tracker_msg:
@@ -531,31 +524,17 @@ async def run_live_auction(bot, guild):
             except asyncio.TimeoutError:
                 if current_bid == 0:
                     await bidding_channel.send(embed=create_embed("No Bids", f"{E_ALERT} No one bid on {auc_id}. Moving to next slot.", 0x95a5a6))
-                    
-                    # ==========================================
-                    # THE FIX: Save the Unsold record to History
-                    # ==========================================
-                    auction_history_col.insert_one({
-                        "auction_id": auc_id, 
-                        "seller_id": seller_id, 
-                        "buyer_id": "None", 
-                        "pokemon_id": pokemon_id,
-                        "final_price": 0, 
-                        "status": "Unsold", 
-                        "dispute_reason": "No bids were placed.", 
-                        "log_url": "None"
-                    })
-                    
+                    auction_history_col.insert_one({"auction_id": auc_id, "seller_id": seller_id, "buyer_id": "None", "pokemon_id": pokemon_id, "final_price": 0, "status": "Unsold", "dispute_reason": "No bids.", "log_url": "None"})
                     bidding_active = False
                     break
                     
-                # 15 Second Warning
                 warn_desc = f"**<@{highest_bidder}>** holds the highest bid at **{current_bid:,} PC**!\nIf no higher bids are placed in the next **15 seconds**, the auction will close!"
                 await bidding_channel.send(embed=create_embed(f"{E_ALERT} GOING ONCE...", warn_desc, 0xe67e22))
                 
                 try:
                     bid_msg = await bot.wait_for('message', timeout=15.0, check=check_bid)
-                    current_bid = bid_msg.valid_bid_amount
+                    # Recalculate here too!
+                    current_bid = get_bid_value(bid_msg.content)
                     highest_bidder = bid_msg.author.id
                     min_increment = int(current_bid * 1.025)
                     
@@ -571,8 +550,6 @@ async def run_live_auction(bot, guild):
                 except asyncio.TimeoutError:
                     await bidding_channel.send(embed=create_embed(f"{E_SUCCESS} SOLD!", f"Congratulations to <@{highest_bidder}> for winning **{auc_id}** for **{current_bid:,} PC**!", 0x2ecc71))
                     bidding_active = False
-                    
-                    # Transition to Phase 4 (Escrow thread)
                     await create_escrow_thread(bot, guild, auc_id, seller_id, highest_bidder, current_bid, pokemon_id)
 
        # ==========================================
