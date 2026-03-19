@@ -550,7 +550,22 @@ async def run_live_auction(bot, guild):
                 except asyncio.TimeoutError:
                     await bidding_channel.send(embed=create_embed(f"{E_SUCCESS} SOLD!", f"Congratulations to <@{highest_bidder}> for winning **{auc_id}** for **{current_bid:,} PC**!", 0x2ecc71))
                     bidding_active = False
-                    await create_escrow_thread(bot, guild, auc_id, seller_id, highest_bidder, current_bid, pokemon_id)
+                    
+                    # ==========================================
+                    # NEW: GENERATE BIDDING TRANSCRIPT BEFORE PURGE
+                    # ==========================================
+                    bid_html = None
+                    try:
+                        bid_html = await chat_exporter.export(bidding_channel, bot=bot)
+                    except Exception as e:
+                        print(f"[ERROR] Could not export bidding chat: {e}")
+                    
+                    # ==========================================
+                    # NEW: LAUNCH ESCROW IN THE BACKGROUND
+                    # ==========================================
+                    # Using create_task means the bot WON'T wait. It will instantly 
+                    # move to Phase 6, purge the chat, and start the next Pokémon!
+                    bot.loop.create_task(create_escrow_thread(bot, guild, auc_id, seller_id, highest_bidder, current_bid, pokemon_id, bid_html))
 
        # ==========================================
         # 6. CLEANUP & LOCKDOWN BETWEEN AUCTIONS
@@ -571,7 +586,7 @@ async def run_live_auction(bot, guild):
         # Wait 5 seconds before looping to the next Pokémon
         await asyncio.sleep(5)
 
-async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_price, pokemon_id):
+async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_price, pokemon_id, bid_html):
     bidding_channel = guild.get_channel(1483860258932916336)
     accept_logs = guild.get_channel(1483860540840214629)
     disputes_logs = guild.get_channel(1483860590907883580)
@@ -658,62 +673,51 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
             break
 
     # ==========================================
-    # 4. GENERATE HTML TRANSCRIPT
+    # 4. GENERATE ESCROW HTML
     # ==========================================
-    transcript_file = None
+    escrow_html = None
     try:
-        # Generate the HTML file of the thread
-        transcript = await chat_exporter.export(thread, bot=bot)
-        if transcript:
-            transcript_file = discord.File(io.BytesIO(transcript.encode('utf-8')), filename=f"transcript_{auc_id}.html")
+        escrow_html = await chat_exporter.export(thread, bot=bot)
     except Exception as e:
-        print(f"[TRANSCRIPT ERROR] Could not generate HTML for {auc_id}. Error: {e}")
+        print(f"[TRANSCRIPT ERROR] Could not generate Escrow HTML for {auc_id}. Error: {e}")
 
     # ==========================================
-    # 5. RESOLUTION & BUTTON ATTACHMENT
+    # 5. RESOLUTION & MULTI-FILE ATTACHMENT
     # ==========================================
+    # Package up whatever files successfully generated
+    files_to_send = []
+    if bid_html: files_to_send.append(discord.File(io.BytesIO(bid_html.encode('utf-8')), filename=f"Bidding_{auc_id}.html"))
+    if escrow_html: files_to_send.append(discord.File(io.BytesIO(escrow_html.encode('utf-8')), filename=f"Escrow_{auc_id}.html"))
+
     try:
         if dispute_triggered:
             dispute_embed = create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000)
-            
-            # Send file + embed first
-            if transcript_file:
-                log_msg = await disputes_logs.send(embed=dispute_embed, file=transcript_file)
-                # Grab the CDN URL from the attached file and edit the message to add the button
-                transcript_url = log_msg.attachments[0].url
-                await log_msg.edit(view=TranscriptView(transcript_url))
-            else:
-                log_msg = await disputes_logs.send(embed=dispute_embed)
+            log_msg = await disputes_logs.send(embed=dispute_embed, files=files_to_send)
             
             await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
-            
-            # Updates
             wallets_col.update_one({"user_id": str(offender_id)}, {"$inc": {"pc": -2000}}, upsert=True)
             auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
             auction_history_col.insert_one({"auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url if log_msg else "None"})
             
         else:
             success_embed = create_embed(f"🧾 RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71)
-            
-            # Send file + embed first
-            if transcript_file:
-                log_msg = await accept_logs.send(embed=success_embed, file=transcript_file)
-                # Grab the CDN URL from the attached file and edit the message to add the button
-                transcript_url = log_msg.attachments[0].url
-                await log_msg.edit(view=TranscriptView(transcript_url))
-            else:
-                log_msg = await accept_logs.send(embed=success_embed)
+            log_msg = await accept_logs.send(embed=success_embed, files=files_to_send)
             
             await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
-            
-            # Updates
             wallets_col.update_one({"user_id": str(buyer_id)}, {"$inc": {"pc": -final_price}})
             wallets_col.update_one({"user_id": str(seller_id)}, {"$inc": {"pc": final_price}}, upsert=True)
             auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
             auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
-            
             auction_history_col.insert_one({"auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, "final_price": final_price, "status": "Confirmed", "log_url": log_msg.jump_url if log_msg else "None"})
-            
+
+        # Attach UI Buttons based on the URLs of the uploaded files
+        if log_msg:
+            bid_url, esc_url = None, None
+            for attachment in log_msg.attachments:
+                if attachment.filename.startswith("Bidding"): bid_url = attachment.url
+                if attachment.filename.startswith("Escrow"): esc_url = attachment.url
+            await log_msg.edit(view=TranscriptView(bid_url, esc_url))
+
     except Exception as e:
         print(f"[FATAL LOGGING ERROR] Error during resolution phase: {e}")
     
@@ -798,18 +802,25 @@ def parse_time(time_str):
             return None
 
 class TranscriptView(discord.ui.View):
-    def __init__(self, transcript_url: str):
+    def __init__(self, bid_url: str = None, escrow_url: str = None):
         super().__init__(timeout=None)
         
-        # Premium link button
-        self.add_item(discord.ui.Button(
-            label="📄 View HTML Transcript", 
-            style=discord.ButtonStyle.link, 
-            url=transcript_url,
-            # MUST REPLACE WITH YOUR ACTUAL EMOJI ID
-            emoji=discord.PartialEmoji.from_str("<:transcript_link:1234567890>") 
-        ))
-
+        if bid_url:
+            self.add_item(discord.ui.Button(
+                label="📄 Bidding Log", 
+                style=discord.ButtonStyle.link, 
+                url=bid_url,
+                emoji="🔗"
+            ))
+            
+        if escrow_url:
+            self.add_item(discord.ui.Button(
+                label="💼 Escrow Log", 
+                style=discord.ButtonStyle.link, 
+                url=escrow_url,
+                emoji="🔗"
+            ))
+            
 @bot.command(name="scheduleauctions", aliases=["sauc"], description="Schedule a Pokémon auction (e.g., 14:30 or 2:30 PM).")
 @commands.has_permissions(administrator=True)
 async def scheduleauctions(ctx, *, time_str: str):
@@ -945,13 +956,12 @@ async def auctionstatus(ctx):
 class AdminLogView(discord.ui.View):
     def __init__(self, log_url):
         super().__init__(timeout=None)
-        # Premium looking button that links to your transcript
+        # Teleports the Admin straight to the secure log channel message
         self.add_item(discord.ui.Button(
-            label="View HTML Transcript", 
+            label="🔗 Jump to Admin Logs", 
             style=discord.ButtonStyle.link, 
             url=log_url,
-            # Replace this ID with your actual custom link emoji ID
-            emoji=discord.PartialEmoji.from_str("<:transcript_link:1234567890>") 
+            emoji="🔗"
         ))
 
 # ==========================================
