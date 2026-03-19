@@ -686,7 +686,7 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
     transcript_file = None
     try:
         # Generate the HTML file of the thread
-        transcript = await chat_exporter.export(thread)
+        transcript = await chat_exporter.export(thread, bot=bot)
         if transcript:
             transcript_file = discord.File(io.BytesIO(transcript.encode('utf-8')), filename=f"transcript_{auc_id}.html")
     except Exception as e:
@@ -6021,12 +6021,6 @@ async def remindlogin(ctx):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-   
-    # ==========================================
-    # WAKE UP THE TRANSCRIPT ENGINE HERE
-    # ==========================================
-    chat_exporter.init(bot)
-    
     try:
         await bot.tree.sync()
         
