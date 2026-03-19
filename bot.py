@@ -490,7 +490,7 @@ async def run_live_auction(bot, guild):
             # BANK CHECK (Using your get_wallet helper!)
             # ==========================================
             user_wallet = get_wallet(m.author.id) 
-            pc_balance = user_wallet.get("pc", 0)
+            pc_balance = user_wallet.get("pc", 0) if user_wallet else 0
             
             if pc_balance < bid_amount:
                 bot.loop.create_task(m.add_reaction(E_MONEY))
