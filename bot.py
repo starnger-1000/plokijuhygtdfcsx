@@ -371,8 +371,10 @@ async def auction_registration_scanner(message):
             if user_entries >= 2:
                 return # User hit their limit, silently ignore
 
-            # 3. Success! Save to Database as Auc1, Auc2, etc.
-            auc_id = f"Auc{total_entries + 1}"
+            # 3. Success! Generate a permanent, unique ID (e.g., AUC-X7B9K)
+            unique_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+            auc_id = f"AUC-{unique_code}"
+            
             auction_queue_col.insert_one({
                 "auction_id": auc_id,
                 "pokemon_id": pokemon_id,
@@ -462,10 +464,14 @@ async def run_live_auction(bot, guild):
         tracker_msg = None
 
         def check_bid(m):
+            # Ignore messages outside the channel, from bots, or from the seller
             if m.channel.id != bidding_channel.id or m.author.bot or m.author.id == seller_id:
                 return False
             
-            content = m.content.lower().replace(",", "")
+            # Clean the message (removes spaces and commas so " 10k " becomes "10k")
+            content = m.content.lower().replace(",", "").strip()
+            
+            # Must end with k or m
             if not (content.endswith('k') or content.endswith('m')):
                 return False
                 
@@ -475,18 +481,21 @@ async def run_live_auction(bot, guild):
             except ValueError:
                 return False
 
+            # Check 1: Is the bid high enough? (2.5% increment rule)
             if bid_amount < min_increment or bid_amount <= current_bid:
-                # Custom error reaction instead of default cross
                 bot.loop.create_task(m.add_reaction(E_ERROR))
                 return False
 
-            # Ghost Bank Check
+            # Check 2: The Ghost Bank Check
             user_wallet = db.wallets.find_one({"user_id": m.author.id})
             balance = user_wallet.get("balance", 0) if user_wallet else 0
             
             if balance < bid_amount:
+                # If they are broke (or the DB name is wrong), react with Money Emoji!
+                bot.loop.create_task(m.add_reaction(E_MONEY))
                 return False 
                 
+            # Valid bid!
             m.valid_bid_amount = bid_amount
             return True
 
@@ -503,6 +512,9 @@ async def run_live_auction(bot, guild):
 
                 # Quest Hook: Add 1 valid bid to their profile
                 auction_stats_col.update_one({"user_id": highest_bidder}, {"$inc": {"bids_made": 1}}, upsert=True)
+
+                # Update Native Quest System
+                await update_quest(highest_bidder, "auc_bid", 1)
                 
                 # Custom success reaction instead of default checkmark
                 await bid_msg.add_reaction(E_SUCCESS)
@@ -637,40 +649,62 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
             offender_id = buyer_id
             break
 
-    # 4. GENERATE HTML TRANSCRIPT
-    transcript = await chat_exporter.export(thread)
-    transcript_file = discord.File(io.BytesIO(transcript.encode()), filename=f"transcript_{auc_id}.html")
-    
-# 5. RESOLUTION
-    # Send the log first so we can grab the message URL for the Admin HTML button!
-    if dispute_triggered:
-        log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000), file=transcript_file)
-        await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
-        
-        # Stat updates for Disputer
-        db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
-        auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
-        
-        # Save to History for .aucinfo
-        auction_history_col.insert_one({
-            "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, 
-            "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url
-        })
-    else:
-        log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71), file=transcript_file)
-        await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
-        
-        # Stat updates for Buyer and Seller (Quests!)
-        db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
-        db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
-        auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
-        auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
-        
-        # Save to History for .aucinfo
-        auction_history_col.insert_one({
-            "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id,
-            "final_price": final_price, "status": "Confirmed", "log_url": log_msg.jump_url
-        })
+    # 4. GENERATE HTML TRANSCRIPT (Now with a Safety Net!)
+    transcript_file = None
+    try:
+        transcript = await chat_exporter.export(thread)
+        if transcript:
+            transcript_file = discord.File(io.BytesIO(transcript.encode('utf-8')), filename=f"transcript_{auc_id}.html")
+    except Exception as e:
+        print(f"[TRANSCRIPT ERROR] Failed to generate HTML for {auc_id}: {e}")
+
+    # 5. RESOLUTION
+    try:
+        if dispute_triggered:
+            # Send log (with or without file depending on if it crashed)
+            if transcript_file:
+                log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000), file=transcript_file)
+            else:
+                log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000))
+            
+            await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
+            
+            # Stat updates
+            db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
+            
+            # Save History
+            auction_history_col.insert_one({
+                "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, 
+                "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url if log_msg else "None"
+            })
+            
+        else:
+            if transcript_file:
+                log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71), file=transcript_file)
+            else:
+                log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71))
+            
+            await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
+            
+            # Stat updates
+            db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
+            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
+            auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
+            auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
+
+            # Update Native Quest System
+            await update_quest(buyer_id, "auc_win", 1)
+            await update_quest(seller_id, "auc_sell", 1)
+            
+            # Save History
+            auction_history_col.insert_one({
+                "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id,
+                "final_price": final_price, "status": "Confirmed", "log_url": log_msg.jump_url if log_msg else "None"
+            })
+            
+    except Exception as e:
+        print(f"[FATAL LOGGING ERROR] Ensure your Channel IDs are correct! Error: {e}")
     
     # 6. CLEANUP & LOCKDOWN
     if seller: await seller.remove_roles(typing_role)
@@ -2227,7 +2261,9 @@ QUEST_CONFIG = {
             "trade": {"target": 1, "desc": "Trade with a user", "reward": 25000},
             "event": {"target": 1, "desc": "Participate in Event", "reward": 30000},
             "giveaway": {"target": 1, "desc": "Enter a Giveaway", "reward": 15000},
-            "shop": {"target": 1, "desc": "Buy from Shop", "reward": 100000}
+            "shop": {"target": 1, "desc": "Buy from Shop", "reward": 100000},
+            "auc_bid": {"target": 5, "desc": "Place Live Bids", "reward": 50000},
+            "auc_win": {"target": 1, "desc": "Win an Auction", "reward": 100000}
         }
     },
     "weekly": {
@@ -2239,7 +2275,10 @@ QUEST_CONFIG = {
             "trade": {"target": 8, "desc": "Trades Completed", "reward": 125000},
             "event": {"target": 10, "desc": "Events Participated", "reward": 130000},
             "giveaway": {"target": 7, "desc": "Giveaways Entered", "reward": 150000},
-            "shop": {"target": 5, "desc": "Shop Purchases", "reward": 100000}
+            "shop": {"target": 5, "desc": "Shop Purchases", "reward": 100000},
+            "auc_bid": {"target": 25, "desc": "Place Live Bids", "reward": 250000},
+            "auc_win": {"target": 3, "desc": "Win Auctions", "reward": 300000},
+            "auc_sell": {"target": 2, "desc": "Sell via Auction", "reward": 200000}
         }
     },
     "monthly": {
@@ -2253,7 +2292,10 @@ QUEST_CONFIG = {
             "giveaway": {"target": 30, "desc": "Giveaways Entered", "reward": 1500000},
             "shop": {"target": 15, "desc": "Shop Purchases", "reward": 1000000},
             "duelist_club": {"target": 1, "desc": "Register Duelist/Buy Club", "reward": 1000000},
-            "shares": {"target": 1, "desc": "Buy/Sell Shares", "reward": 500000}
+            "shares": {"target": 1, "desc": "Buy/Sell Shares", "reward": 500000},
+            "auc_bid": {"target": 100, "desc": "Place Live Bids", "reward": 1000000},
+            "auc_win": {"target": 10, "desc": "Win Auctions", "reward": 1500000},
+            "auc_sell": {"target": 5, "desc": "Sell via Auction", "reward": 1000000}
         }
     },
     "yearly": {
@@ -2266,7 +2308,10 @@ QUEST_CONFIG = {
             "event": {"target": 1500, "desc": "Events Participated", "reward": 150000000},
             "giveaway": {"target": 500, "desc": "Giveaways Entered", "reward": 150000000},
             "shop": {"target": 150, "desc": "Shop Purchases", "reward": 100000000},
-            "invest": {"target": 50000000, "desc": "Club/Share Value Bought", "reward": 100000000}
+            "invest": {"target": 50000000, "desc": "Club/Share Value Bought", "reward": 100000000},
+            "auc_bid": {"target": 5000, "desc": "Place Live Bids", "reward": 60000000},    # 60M Coins
+            "auc_win": {"target": 500, "desc": "Win Auctions", "reward": 100000000},       # 100M Coins
+            "auc_sell": {"target": 250, "desc": "Sell via Auction", "reward": 75000000},   # 75M Coins
         }
     },
     "career": {
@@ -2280,7 +2325,10 @@ QUEST_CONFIG = {
             "giveaway": {"target": 150, "desc": "Giveaways Entered", "reward": 15000000},
             "shop": {"target": 150, "desc": "Shop Purchases", "reward": 80000000},
             "club_val": {"target": 150000000, "desc": "Buy Club Worth 150m", "reward": 300000000},
-            "share_val": {"target": 100000000, "desc": "Share Trade Volume", "reward": 150000000}
+            "share_val": {"target": 100000000, "desc": "Share Trade Volume", "reward": 150000000},
+            "auc_bid": {"target": 25000, "desc": "Place Live Bids", "reward": 500000000},   # 500M Coins
+            "auc_win": {"target": 2500, "desc": "Win Auctions", "reward": 1000000000},      # 1 Billion Coins
+            "auc_sell": {"target": 1250, "desc": "Sell via Auction", "reward": 500000000},  # 500M Coins
         }
     }
 }
