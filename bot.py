@@ -139,6 +139,8 @@ E_BOOK = "<a:rules:1443252031220613321>"
 E_NYAN = "<a:NyanCat:1443253686771126454>"
 E_GIVEAWAY = "<a:gw:1443251079705001984>" 
 E_CHAT = "<a:text:1443251311939293267>"
+CONFIRM_EMOJI = "<a:verified:962942818886770688>"
+DENY_EMOJI = "<a:cross2:972155180185452544>"
 
 BATTLE_BANTER = [
     "<a:redfire1:1443251827490684938> Absolute demolition! **{winner}** tore **{loser}** apart. {l_emoji}",
@@ -464,41 +466,48 @@ async def run_live_auction(bot, guild):
         tracker_msg = None
 
         def check_bid(m):
-            # Ignore messages outside the channel, from bots, or from the seller
+            # 1. Ignore messages outside the channel, from bots, or from the seller
             if m.channel.id != bidding_channel.id or m.author.bot or m.author.id == seller_id:
                 return False
             
-            # Clean the message (removes spaces and commas so " 10k " becomes "10k")
+            # Clean the message (removes spaces and commas so " 10,000 " or "10k" works)
             content = m.content.lower().replace(",", "").strip()
             
-            # Must end with k or m
-            if not (content.endswith('k') or content.endswith('m')):
-                return False
-                
+            # Parse the amount (accepts 10k, 1m, or just normal numbers like 10000)
             try:
-                multiplier = 1000 if content.endswith('k') else 1000000
-                bid_amount = int(float(content[:-1]) * multiplier)
+                if content.endswith('k'):
+                    bid_amount = int(float(content[:-1]) * 1000)
+                elif content.endswith('m'):
+                    bid_amount = int(float(content[:-1]) * 1000000)
+                else:
+                    bid_amount = int(content)
             except ValueError:
-                return False
+                return False # Not a valid number, ignore it entirely
 
-            # Check 1: Is the bid high enough? (2.5% increment rule)
+            # ==========================================
+            # CHECK 1: IS THE BID HIGHER THAN THE LAST ONE?
+            # ==========================================
+            # If current_bid is 10k, and they bid 10k again (or 9k), it fails.
+            # It also strictly enforces your 2.5% min_increment rule.
             if bid_amount < min_increment or bid_amount <= current_bid:
-                bot.loop.create_task(m.add_reaction(E_ERROR))
+                bot.loop.create_task(m.add_reaction(E_ERROR)) 
                 return False
 
-            # Check 2: The Ghost Bank Check
+            # ==========================================
+            # CHECK 2: DO THEY ACTUALLY HAVE THE PC?
+            # ==========================================
+            # If they bid 20k, this checks their database wallet to ensure they have >= 20k.
             user_wallet = db.wallets.find_one({"user_id": m.author.id})
             balance = user_wallet.get("balance", 0) if user_wallet else 0
             
             if balance < bid_amount:
-                # If they are broke (or the DB name is wrong), react with Money Emoji!
-                bot.loop.create_task(m.add_reaction(E_MONEY))
+                bot.loop.create_task(m.add_reaction(E_MONEY)) 
                 return False 
                 
-            # Valid bid!
+            # Valid bid! Passed both checks.
             m.valid_bid_amount = bid_amount
             return True
-
+        
         # The Timer Loop
         bidding_active = True
         while bidding_active:
@@ -558,9 +567,23 @@ async def run_live_auction(bot, guild):
                     # Transition to Phase 4 (Escrow thread)
                     await create_escrow_thread(bot, guild, auc_id, seller_id, highest_bidder, current_bid, pokemon_id)
 
-        # Clean up role for the next iteration
+       # ==========================================
+        # 6. CLEANUP & LOCKDOWN BETWEEN AUCTIONS
+        # ==========================================
+        # Instantly lock the channel so no one can spam late bids
+        await bidding_channel.set_permissions(guild.default_role, send_messages=False)
+
+        # Clean up the seller role
         if seller: await seller.remove_roles(seller_role)
+        
+        # Purge the chat to keep the premium clean look
         await bidding_channel.purge(limit=100)
+        
+        # Send the lock embed AFTER the purge so it doesn't get deleted
+        lock_desc = f"{E_ALERT} The floor is temporarily locked while we process this transaction and prepare the next slot..."
+        await bidding_channel.send(embed=create_embed("🔒 Bidding Paused", lock_desc, 0xe74c3c))
+        
+        # Wait 5 seconds before looping to the next Pokémon
         await asyncio.sleep(5)
 
 async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_price, pokemon_id):
@@ -658,46 +681,58 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
     except Exception as e:
         print(f"[TRANSCRIPT ERROR] Failed to generate HTML for {auc_id}: {e}")
 
-    # 5. RESOLUTION
+    # ==========================================
+    # 5. RESOLUTION (With Premium Transcript Buttons)
+    # ==========================================
     try:
         if dispute_triggered:
-            # Send log (with or without file depending on if it crashed)
+            dispute_embed = create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000)
+            
+            # Send the log. If there's a file, grab its URL and add the button!
             if transcript_file:
-                log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000), file=transcript_file)
+                log_msg = await disputes_logs.send(embed=dispute_embed, file=transcript_file)
+                # Grab the Discord CDN link from the attachment we just sent
+                transcript_url = log_msg.attachments[0].url
+                # Attach the premium button linking to that file
+                await log_msg.edit(view=TranscriptView(transcript_url))
             else:
-                log_msg = await disputes_logs.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG", f"**User:** <@{offender_id}>\n**ID:** {auc_id}\n**Reason:** {dispute_reason}", 0xff0000))
+                log_msg = await disputes_logs.send(embed=dispute_embed)
             
             await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
             
-            # Stat updates
+            # Stat updates & History
             db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
             auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
             
-            # Save History
             auction_history_col.insert_one({
                 "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, 
                 "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url if log_msg else "None"
             })
             
         else:
+            success_embed = create_embed(f"🧾 RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71)
+            
+            # Send the log. If there's a file, grab its URL and add the button!
             if transcript_file:
-                log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71), file=transcript_file)
+                log_msg = await accept_logs.send(embed=success_embed, file=transcript_file)
+                # Grab the Discord CDN link from the attachment
+                transcript_url = log_msg.attachments[0].url
+                # Attach the premium button
+                await log_msg.edit(view=TranscriptView(transcript_url))
             else:
-                log_msg = await accept_logs.send(embed=create_embed(f"RECEIPT: {auc_id}", f"**Seller:** <@{seller_id}>\n**Buyer:** <@{buyer_id}>\n**Price:** {final_price:,} PC", 0x2ecc71))
+                log_msg = await accept_logs.send(embed=success_embed)
             
             await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
             
-            # Stat updates
+            # Stat updates & History
             db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
             db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
             auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
             auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
 
-            # Update Native Quest System
             await update_quest(buyer_id, "auc_win", 1)
             await update_quest(seller_id, "auc_sell", 1)
             
-            # Save History
             auction_history_col.insert_one({
                 "auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id,
                 "final_price": final_price, "status": "Confirmed", "log_url": log_msg.jump_url if log_msg else "None"
@@ -785,6 +820,19 @@ def parse_time(time_str):
             return datetime.strptime(time_str, "%I:%M %p").strftime("%H:%M")
         except ValueError:
             return None
+
+class TranscriptView(discord.ui.View):
+    def __init__(self, transcript_url: str):
+        super().__init__(timeout=None)
+        
+        # Premium link button
+        self.add_item(discord.ui.Button(
+            label="📄 View HTML Transcript", 
+            style=discord.ButtonStyle.link, 
+            url=transcript_url,
+            # MUST REPLACE WITH YOUR ACTUAL EMOJI ID
+            emoji=discord.PartialEmoji.from_str("<:transcript_link:1234567890>") 
+        ))
 
 @bot.command(name="scheduleauctions", aliases=["sauc"], description="Schedule a Pokémon auction (e.g., 14:30 or 2:30 PM).")
 @commands.has_permissions(administrator=True)
@@ -921,11 +969,24 @@ async def auctionstatus(ctx):
 class AdminLogView(discord.ui.View):
     def __init__(self, log_url):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="View HTML Transcript", url=log_url, style=discord.ButtonStyle.link))
+        # Premium looking button that links to your transcript
+        self.add_item(discord.ui.Button(
+            label="View HTML Transcript", 
+            style=discord.ButtonStyle.link, 
+            url=log_url,
+            # Replace this ID with your actual custom link emoji ID
+            emoji=discord.PartialEmoji.from_str("<:transcript_link:1234567890>") 
+        ))
 
-@bot.command(name="auctioninfo", aliases=["aucinfo"], description="Look up the receipt and details of a specific Auction ID.")
-async def auctioninfo(ctx, auc_id: str, mode: str = "user"):
-    history = auction_history_col.find_one({"auction_id": auc_id.capitalize()})
+# ==========================================
+# PREFIX COMMAND (.)
+# ==========================================
+@bot.command(name="auctioninfo", aliases=["aucinfo", "ai"], description="Look up the receipt and details of a specific Auction ID.")
+async def auctioninfo_prefix(ctx, auc_id: str, mode: str = "user"):
+    # Force uppercase to safely match modern IDs like AUC-X7B9K
+    auc_id = auc_id.upper() 
+    history = auction_history_col.find_one({"auction_id": auc_id})
+    
     if not history:
         return await ctx.send(embed=create_embed("Not Found", f"{E_ERROR} No records found for **{auc_id}**.", 0xff0000))
 
@@ -935,7 +996,7 @@ async def auctioninfo(ctx, auc_id: str, mode: str = "user"):
         f"**Seller:** <@{history.get('seller_id', '0')}>\n"
         f"**Buyer/Winner:** <@{history.get('buyer_id', '0')}>\n"
         f"**Final Price:** {history.get('final_price', 0):,} PC\n"
-        f"**Status:** {status_icon} {history['status']}\n"
+        f"**Status:** {status_icon} **{history['status']}**\n"
     )
     
     if history.get('dispute_reason'):
@@ -944,9 +1005,42 @@ async def auctioninfo(ctx, auc_id: str, mode: str = "user"):
     # If Admin requests it, give them the HTML transcript link button
     if mode.lower() == "admin" and ctx.author.guild_permissions.administrator:
         log_url = history.get('log_url', 'https://discord.com')
-        await ctx.send(embed=create_embed(f"AUCTION RECEIPT: {auc_id} [ADMIN]", desc, 0x9b59b6), view=AdminLogView(log_url))
+        await ctx.send(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id} [ADMIN]", desc, 0x9b59b6), view=AdminLogView(log_url))
     else:
-        await ctx.send(embed=create_embed(f"AUCTION RECEIPT: {auc_id}", desc, 0x3498db))
+        await ctx.send(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id}", desc, 0x3498db))
+
+
+# ==========================================
+# SLASH COMMAND (/)
+# ==========================================
+@bot.tree.command(name="auctioninfo", description="Look up the receipt and details of a specific Auction ID.")
+@discord.app_commands.describe(auc_id="The Auction ID (e.g., AUC-X7B9K)", mode="Type 'admin' to view logs (Admins only)")
+async def auctioninfo_slash(interaction: discord.Interaction, auc_id: str, mode: str = "user"):
+    # Force uppercase to safely match modern IDs like AUC-X7B9K
+    auc_id = auc_id.upper()
+    history = auction_history_col.find_one({"auction_id": auc_id})
+    
+    if not history:
+        return await interaction.response.send_message(embed=create_embed("Not Found", f"{E_ERROR} No records found for **{auc_id}**.", 0xff0000))
+
+    status_icon = E_SUCCESS if history['status'] == 'Confirmed' else E_ERROR
+    desc = (
+        f"**Pokémon ID:** `{history.get('pokemon_id', 'N/A')}`\n"
+        f"**Seller:** <@{history.get('seller_id', '0')}>\n"
+        f"**Buyer/Winner:** <@{history.get('buyer_id', '0')}>\n"
+        f"**Final Price:** {history.get('final_price', 0):,} PC\n"
+        f"**Status:** {status_icon} **{history['status']}**\n"
+    )
+    
+    if history.get('dispute_reason'):
+        desc += f"\n{E_ALERT} **Dispute Reason:** {history['dispute_reason']}"
+
+    # If Admin requests it, give them the HTML transcript link button
+    if mode.lower() == "admin" and interaction.user.guild_permissions.administrator:
+        log_url = history.get('log_url', 'https://discord.com')
+        await interaction.response.send_message(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id} [ADMIN]", desc, 0x9b59b6), view=AdminLogView(log_url))
+    else:
+        await interaction.response.send_message(embed=create_embed(f"🧾 AUCTION RECEIPT: {auc_id}", desc, 0x3498db))
 
 # ==============================================================================
 #  PC WITHDRAWAL SYSTEM
