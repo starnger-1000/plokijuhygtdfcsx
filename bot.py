@@ -426,7 +426,7 @@ async def run_live_auction(bot, guild):
             # Trap 1: AFK Seller Penalty
             await bidding_channel.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Seller failed to info in 90s. Slot skipped.", 0xff0000))
             if seller: await seller.remove_roles(seller_role)
-            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            wallets_col.update_one({"user_id": str(seller_id)}, {"$inc": {"pc": -2000}}, upsert=True)
             await disputes_channel.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG: AFK SELLER", f"**User:** <@{seller_id}>\n**ID:** {auc_id}\n**Penalty:** 2,000 PC deducted.", 0xff0000))
             continue
 
@@ -452,7 +452,7 @@ async def run_live_auction(bot, guild):
             # Trap 2: Trash Registration Penalty
             await bidding_channel.send(embed=create_embed("Vote Failed", f"{E_ERROR} Community rejected this Pokémon. Slot skipped.", 0xff0000))
             if seller: await seller.remove_roles(seller_role)
-            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            wallets_col.update_one({"user_id": str(seller_id)}, {"$inc": {"pc": -2000}}, upsert=True)
             await disputes_channel.send(embed=create_embed(f"{E_ERROR} DISPUTE LOG: FAILED VOTE", f"**User:** <@{seller_id}>\n**ID:** {auc_id}\n**Votes:** {yes_count} Yes / {no_count} No\n**Penalty:** 2,000 PC deducted.", 0xff0000))
             continue
 
@@ -466,53 +466,38 @@ async def run_live_auction(bot, guild):
         tracker_msg = None
 
         def check_bid(m):
-            # 1. First, print every single message the bot sees in that channel
-            if m.channel.id == bidding_channel.id and not m.author.bot:
-                print(f"[DEBUG] Saw message from {m.author}: '{m.content}'")
-
-            # 2. Channel & Bot Check
-            if m.channel.id != bidding_channel.id or m.author.bot:
-                return False
-                
-            # 3. Seller Check (THE SOLO TESTER TRAP)
-            if m.author.id == seller_id:
-                print(f"[DEBUG] Ignored {m.author} because they are the seller.")
+            if m.channel.id != bidding_channel.id or m.author.bot or m.author.id == seller_id:
                 return False
             
-            # Clean the text
-            content = m.content.lower().replace(",", "").strip()
+            # Uses your HumanInt cleaning logic
+            content = m.content.lower().replace(",", "").replace("$", "").strip()
             
-            # 4. Number Parse Check
             try:
-                if content.endswith('k'): bid_amount = int(float(content[:-1]) * 1000)
-                elif content.endswith('m'): bid_amount = int(float(content[:-1]) * 1000000)
+                if "k" in content: bid_amount = int(float(content.replace("k", "")) * 1000)
+                elif "m" in content: bid_amount = int(float(content.replace("m", "")) * 1000000)
+                elif "b" in content: bid_amount = int(float(content.replace("b", "")) * 1000000000)
                 else: bid_amount = int(content)
             except ValueError:
-                print(f"[DEBUG] Ignored '{content}' because it is not a valid number (ValueError).")
                 return False
 
-            print(f"[DEBUG] Parsed bid amount: {bid_amount}. Checking math...")
-            
-            # 5. Math Check
+            # MATH CHECK
             if bid_amount < min_increment or bid_amount <= current_bid:
-                print(f"[DEBUG] Math failed. Bid: {bid_amount}, Min required: {min_increment}")
                 bot.loop.create_task(m.add_reaction(E_ERROR))
                 bot.loop.create_task(m.reply(f"❌ Denied: Your bid must be at least **{min_increment:,} PC**.", delete_after=5))
                 return False
 
-            print(f"[DEBUG] Math passed. Checking bank balance...")
+            # ==========================================
+            # BANK CHECK (Using your get_wallet helper!)
+            # ==========================================
+            user_wallet = get_wallet(m.author.id) 
+            pc_balance = user_wallet.get("pc", 0)
             
-            # 6. Bank Check
-            user_wallet = db.wallets.find_one({"user_id": {"$in": [m.author.id, str(m.author.id)]}})
-            balance = user_wallet.get("balance", 0) if user_wallet else 0
-            
-            if balance < bid_amount:
-                print(f"[DEBUG] Bank failed. Has: {balance}, Bid: {bid_amount}")
+            if pc_balance < bid_amount:
                 bot.loop.create_task(m.add_reaction(E_MONEY))
-                bot.loop.create_task(m.reply(f"❌ Denied: You only have **{balance:,} PC**.", delete_after=5))
+                bot.loop.create_task(m.reply(f"❌ Denied: You only have **{pc_balance:,} PC** in your wallet.", delete_after=5))
                 return False 
                 
-            print(f"[DEBUG] BID SUCCESSFUL!")
+            # Valid bid!
             m.valid_bid_amount = bid_amount
             return True
         
@@ -546,6 +531,21 @@ async def run_live_auction(bot, guild):
             except asyncio.TimeoutError:
                 if current_bid == 0:
                     await bidding_channel.send(embed=create_embed("No Bids", f"{E_ALERT} No one bid on {auc_id}. Moving to next slot.", 0x95a5a6))
+                    
+                    # ==========================================
+                    # THE FIX: Save the Unsold record to History
+                    # ==========================================
+                    auction_history_col.insert_one({
+                        "auction_id": auc_id, 
+                        "seller_id": seller_id, 
+                        "buyer_id": "None", 
+                        "pokemon_id": pokemon_id,
+                        "final_price": 0, 
+                        "status": "Unsold", 
+                        "dispute_reason": "No bids were placed.", 
+                        "log_url": "None"
+                    })
+                    
                     bidding_active = False
                     break
                     
@@ -711,7 +711,7 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
             await thread.send(embed=create_embed("Dispute Triggered", f"{E_ERROR} Trade failed: {dispute_reason}. Thread locking.", 0xff0000))
             
             # Updates
-            db.wallets.update_one({"user_id": offender_id}, {"$inc": {"balance": -2000}}, upsert=True)
+            wallets_col.update_one({"user_id": str(offender_id)}, {"$inc": {"pc": -2000}}, upsert=True)
             auction_stats_col.update_one({"user_id": offender_id}, {"$inc": {"disputes_caused": 1, "penalties_paid": 2000}}, upsert=True)
             auction_history_col.insert_one({"auction_id": auc_id, "seller_id": seller_id, "buyer_id": buyer_id, "pokemon_id": pokemon_id, "status": "Disputed", "dispute_reason": dispute_reason, "log_url": log_msg.jump_url if log_msg else "None"})
             
@@ -730,8 +730,8 @@ async def create_escrow_thread(bot, guild, auc_id, seller_id, buyer_id, final_pr
             await thread.send(embed=create_embed("Trade Confirmed", f"{E_SUCCESS} Ze Bot successfully transferred {final_price:,} PC!", 0x2ecc71))
             
             # Updates
-            db.wallets.update_one({"user_id": buyer_id}, {"$inc": {"balance": -final_price}})
-            db.wallets.update_one({"user_id": seller_id}, {"$inc": {"balance": final_price}}, upsert=True)
+            wallets_col.update_one({"user_id": str(buyer_id)}, {"$inc": {"pc": -final_price}})
+            wallets_col.update_one({"user_id": str(seller_id)}, {"$inc": {"pc": final_price}}, upsert=True)
             auction_stats_col.update_one({"user_id": buyer_id}, {"$inc": {"pc_spent": final_price, "auctions_won": 1}}, upsert=True)
             auction_stats_col.update_one({"user_id": seller_id}, {"$inc": {"pc_earned": final_price, "confirmed_trades": 1, "pokemon_registered": 1}}, upsert=True)
             
@@ -6021,6 +6021,12 @@ async def remindlogin(ctx):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+   
+    # ==========================================
+    # WAKE UP THE TRANSCRIPT ENGINE HERE
+    # ==========================================
+    chat_exporter.init(bot)
+    
     try:
         await bot.tree.sync()
         
