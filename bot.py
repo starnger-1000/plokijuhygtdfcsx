@@ -1,6 +1,6 @@
 # bot.py
 # Full Club Auction & Pokémon Shop Bot (Certified Final Production Build v5.8)
-# Part 1 of 4 - Core, Config, Events, Economy & Groups
+# Part 1 of 4 - Core, Config, Events, Economy & Groups 
 # Dependencies: discord.py, pymongo, dnspython, certifi
 
 import os
