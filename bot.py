@@ -1169,7 +1169,6 @@ async def pc_claim_alert_task():
 # ==========================================================
 # PREMIUM PREDICTION SYSTEM
 # ==========================================================
-import uuid
 
 # --- ADMIN EVENT CREATION VIEWS & MODALS ---
 class AddMatchModal(discord.ui.Modal):
