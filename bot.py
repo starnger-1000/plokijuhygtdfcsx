@@ -1475,7 +1475,7 @@ def get_pred_user(user_id):
     return user
 
 # --- ADMIN COMMANDS: LOGGING & OVERVIEW ---
-@bot.command(name="listpredictions", aliases=["lp"], description="View active tickets for the current event.")
+@bot.command(name="listpredictions", aliases=["listp"], description="View active tickets for the current event.")
 @commands.has_permissions(administrator=True)
 async def listpredictions_prefix(ctx):
     event = prediction_events_col.find_one({"status": "active"})
