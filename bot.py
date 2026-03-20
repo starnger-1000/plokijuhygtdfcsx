@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 import math
 import chat_exporter
 import io
+import uuid
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -205,6 +206,12 @@ if db is not None:
     auction_queue_col = db.auction_queue
     auction_stats_col = db.auction_stats
     auction_history_col = db.auction_history
+    prediction_events_col = db["prediction_events"]
+    prediction_tickets_col = db["prediction_tickets"]
+    prediction_users_col = db["prediction_users"]
+
+PREDICTION_PING_ROLE = "<@&1458516530739286111>"
+PREDICTION_LOG_CHANNEL_ID = 1445461752094396446
 
 # Indian Standard Time (IST) setup
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -1159,6 +1166,134 @@ async def pc_claim_alert_task():
                 
         await asyncio.sleep(60) # Check every 60 seconds
 
+# ==========================================================
+# PREMIUM PREDICTION SYSTEM
+# ==========================================================
+import uuid
+
+# --- ADMIN EVENT CREATION VIEWS & MODALS ---
+class AddMatchModal(discord.ui.Modal):
+    def __init__(self, match_type, event_id):
+        super().__init__(title=f"Add {match_type} Match")
+        self.match_type = match_type
+        self.event_id = event_id
+        
+        self.team_a = discord.ui.TextInput(label="Team 1 Name", placeholder="e.g., Real Madrid")
+        self.team_b = discord.ui.TextInput(label="Team 2 Name", placeholder="e.g., Barcelona")
+        self.time_limit = discord.ui.TextInput(label="Lock-in Time String", placeholder="e.g., 2h 15m")
+        
+        self.add_item(self.team_a)
+        self.add_item(self.team_b)
+        self.add_item(self.time_limit)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        match_data = {
+            "match_id": str(uuid.uuid4())[:8],
+            "team_a": self.team_a.value,
+            "team_b": self.team_b.value,
+            "time_limit": self.time_limit.value,
+            "status": "open"
+        }
+        
+        update_field = "football_matches" if self.match_type == "Football" else "cricket_matches"
+        prediction_events_col.update_one({"event_id": self.event_id}, {"$push": {update_field: match_data}})
+        await interaction.response.send_message(f"{E_SUCCESS} Added {self.team_a.value} vs {self.team_b.value}!", ephemeral=True)
+
+class AdminEventView(discord.ui.View):
+    def __init__(self, event_id):
+        super().__init__(timeout=None)
+        self.event_id = event_id
+
+    @discord.ui.button(label="Add Football", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_FIRE))
+    async def add_football(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddMatchModal("Football", self.event_id))
+
+    @discord.ui.button(label="Add Cricket", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_STARS))
+    async def add_cricket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddMatchModal("Cricket", self.event_id))
+
+    @discord.ui.button(label="Publish & Open Event", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ALERT))
+    async def publish_event(self, interaction: discord.Interaction, button: discord.ui.Button):
+        prediction_events_col.update_one({"event_id": self.event_id}, {"$set": {"status": "active"}})
+        
+        event = prediction_events_col.find_one({"event_id": self.event_id})
+        desc = f"{E_ARROW} The betting floor is officially live! Build your betslip and secure your legacy!\n\n"
+        
+        if event.get("football_matches"):
+            desc += f"**{E_FIRE} FEATURED FOOTBALL**\n"
+            for m in event["football_matches"]: desc += f"{E_ARROW} {m['team_a']} vs {m['team_b']} `[ {E_TIMER} {m['time_limit']} ]`\n"
+            
+        if event.get("cricket_matches"):
+            desc += f"\n**{E_STARS} FEATURED CRICKET**\n"
+            for m in event["cricket_matches"]: desc += f"{E_ARROW} {m['team_a']} vs {m['team_b']} `[ {E_TIMER} {m['time_limit']} ]`\n"
+            
+        desc += f"\n**How to play:**\nType `.prediction` anywhere to open your private betslip!"
+        
+        embed = discord.Embed(title=f"{E_CROWN} OFFICIAL ZE BOT PREDICTION EVENT #{self.event_id}", description=desc, color=0xf1c40f)
+        await interaction.channel.send(content=f"{E_ALERT} {PREDICTION_PING_ROLE} **A NEW PREDICTION EVENT HAS BEGUN!**", embed=embed)
+        await interaction.response.edit_message(content=f"{E_SUCCESS} Event Published!", view=None)
+
+# --- USER BETTING MODALS ---
+class FootballBetModal(discord.ui.Modal):
+    def __init__(self, match_id, team_a, team_b, ticket_id):
+        super().__init__(title=f"Predict: {team_a[:10]} vs {team_b[:10]}")
+        self.match_id = match_id
+        self.ticket_id = ticket_id
+        
+        self.goals_a = discord.ui.TextInput(label=f"Goals for {team_a}", placeholder="e.g., 2", max_length=2)
+        self.goals_b = discord.ui.TextInput(label=f"Goals for {team_b}", placeholder="e.g., 1", max_length=2)
+        self.wager = discord.ui.TextInput(label="Stake (Amount & Currency)", placeholder="e.g., 2000 PC or 50 SC")
+        
+        self.add_item(self.goals_a)
+        self.add_item(self.goals_b)
+        self.add_item(self.wager)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        bet_data = {"match_id": self.match_id, "type": "football", "prediction": f"{self.goals_a.value}-{self.goals_b.value}", "wager_raw": self.wager.value}
+        prediction_tickets_col.update_one({"ticket_id": self.ticket_id}, {"$push": {"bets": bet_data}}, upsert=True)
+        await interaction.response.send_message(f"{E_SUCCESS} Football wager saved to draft!", ephemeral=True)
+
+class CricketBetModal(discord.ui.Modal):
+    def __init__(self, match_id, team_a, team_b, ticket_id):
+        super().__init__(title=f"Predict: {team_a[:10]} vs {team_b[:10]}")
+        self.match_id = match_id
+        self.ticket_id = ticket_id
+        
+        self.winner = discord.ui.TextInput(label="Who will win?", placeholder=f"e.g., {team_a}")
+        self.stats = discord.ui.TextInput(label="Runs & Wickets (Optional)", placeholder="e.g., 210/4", required=False)
+        self.wager = discord.ui.TextInput(label="Stake (Amount & Currency)", placeholder="e.g., 2000 PC or 50 SC")
+        
+        self.add_item(self.winner)
+        self.add_item(self.stats)
+        self.add_item(self.wager)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        bet_data = {"match_id": self.match_id, "type": "cricket", "prediction": f"Win: {self.winner.value} ({self.stats.value})", "wager_raw": self.wager.value}
+        prediction_tickets_col.update_one({"ticket_id": self.ticket_id}, {"$push": {"bets": bet_data}}, upsert=True)
+        await interaction.response.send_message(f"{E_SUCCESS} Cricket wager saved to draft!", ephemeral=True)
+
+class OpinionModal(discord.ui.Modal, title="Unpopular Opinion"):
+    def __init__(self, ticket_id):
+        super().__init__()
+        self.ticket_id = ticket_id
+        self.opinion = discord.ui.TextInput(label="Type your boldest take for this event:", style=discord.TextStyle.paragraph)
+        self.add_item(self.opinion)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        prediction_tickets_col.update_one({"ticket_id": self.ticket_id}, {"$set": {"opinion": self.opinion.value}}, upsert=True)
+        await interaction.response.send_message(f"{E_SUCCESS} Opinion locked in!", ephemeral=True)
+
+# --- ADMIN COMMANDS ---
+@bot.command(name="manageevent", aliases=["me"], description="Open the Prediction Event admin panel.")
+@commands.has_permissions(administrator=True)
+async def manageevent_prefix(ctx):
+    event_id = str(prediction_events_col.count_documents({}) + 1)
+    if not prediction_events_col.find_one({"event_id": event_id}):
+        prediction_events_col.insert_one({"event_id": event_id, "status": "draft", "football_matches": [], "cricket_matches": []})
+        
+    embed = discord.Embed(title=f"{E_ALERT} EVENT CONTROL PANEL (EVENT #{event_id})", description=f"Status: {E_ACTIVE} *Drafting*\nClick the buttons below to add matches before publishing.", color=0xe67e22)
+    await ctx.send(embed=embed, view=AdminEventView(event_id))
+
 class Paginator(View):
     def __init__(self, ctx, data, title, color, per_page=10):
         super().__init__(timeout=60)
@@ -1192,6 +1327,346 @@ class Paginator(View):
         self.current_page += 1
         self.update_buttons()
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+# ==========================================================
+# 🔮 PHASE 2: USER BETSLIP & TRACKING COMMANDS
+# ==========================================================
+
+class UserPredictionView(discord.ui.View):
+    def __init__(self, event, ticket_id, author_id):
+        super().__init__(timeout=None)
+        self.event = event
+        self.ticket_id = ticket_id
+        self.author_id = author_id
+
+        # Premium Dropdowns
+        if event.get("football_matches"):
+            fb_options = [discord.SelectOption(label=f"{m['team_a']} vs {m['team_b']}", value=m['match_id'], emoji=discord.PartialEmoji.from_str(E_FIRE)) for m in event["football_matches"][:25]]
+            fb_select = discord.ui.Select(placeholder="Select a Football Match...", options=fb_options, custom_id=f"fb_{ticket_id}")
+            fb_select.callback = self.football_callback
+            self.add_item(fb_select)
+
+        if event.get("cricket_matches"):
+            cr_options = [discord.SelectOption(label=f"{m['team_a']} vs {m['team_b']}", value=m['match_id'], emoji=discord.PartialEmoji.from_str(E_STARS)) for m in event["cricket_matches"][:25]]
+            cr_select = discord.ui.Select(placeholder="Select a Cricket Match...", options=cr_options, custom_id=f"cr_{ticket_id}")
+            cr_select.callback = self.cricket_callback
+            self.add_item(cr_select)
+
+    @discord.ui.button(label="Unpopular Opinion", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_CHAT), row=2)
+    async def opinion_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id: 
+            return await interaction.response.send_message(f"{E_ERROR} Not your betslip!", ephemeral=True)
+        await interaction.response.send_modal(OpinionModal(self.ticket_id))
+
+    @discord.ui.button(label="Lock in Betslip", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(CONFIRM_EMOJI), row=3)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id: 
+            return await interaction.response.send_message(f"{E_ERROR} Not your betslip!", ephemeral=True)
+        
+        ticket = prediction_tickets_col.find_one({"ticket_id": self.ticket_id})
+        if not ticket or not ticket.get("opinion"):
+            return await interaction.response.send_message(f"{E_ALERT} You must submit an Unpopular Opinion before locking your ticket!", ephemeral=True)
+        
+        # Lock ticket in database
+        prediction_tickets_col.update_one({"ticket_id": self.ticket_id}, {"$set": {"status": "locked", "user_id": interaction.user.id}})
+        
+        # Send Public Receipt to the Thread Channel
+        log_channel = interaction.guild.get_thread(PREDICTION_LOG_CHANNEL_ID) or interaction.guild.get_channel(PREDICTION_LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = discord.Embed(title=f"{E_ITEMBOX} NEW PREDICTION: {interaction.user.name}", description=f"**Ticket ID:** `{self.ticket_id}` | **Event:** {self.event['event_id']}", color=0x2ecc71)
+            for bet in ticket.get("bets", []):
+                icon = E_FIRE if bet["type"] == "football" else E_STARS
+                log_embed.add_field(name=f"{icon} Match: {bet['match_id']}", value=f"{E_ARROW} **Predict:** {bet['prediction']}\n{E_MONEY} **Stake:** {bet['wager_raw']}", inline=False)
+            log_embed.add_field(name=f"{E_CHAT} Bold Take:", value=f"*{ticket.get('opinion')}*", inline=False)
+            await log_channel.send(embed=log_embed)
+
+        await interaction.message.delete()
+        await interaction.response.send_message(f"{E_SUCCESS} **BETSLIP LOCKED!** Your wagers are secured. Use `.myp` to view them.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel Ticket", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(DENY_EMOJI), row=3)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id: 
+            return await interaction.response.send_message(f"{E_ERROR} Not your betslip!", ephemeral=True)
+        prediction_tickets_col.delete_one({"ticket_id": self.ticket_id})
+        await interaction.message.delete()
+        await interaction.response.send_message(f"{E_ERROR} Ticket cancelled.", ephemeral=True)
+
+    async def football_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id: return await interaction.response.send_message(f"{E_ERROR} Not your betslip!", ephemeral=True)
+        match_id = interaction.data['values'][0]
+        match = next((m for m in self.event["football_matches"] if m["match_id"] == match_id), None)
+        if match: await interaction.response.send_modal(FootballBetModal(match_id, match["team_a"], match["team_b"], self.ticket_id))
+
+    async def cricket_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id: return await interaction.response.send_message(f"{E_ERROR} Not your betslip!", ephemeral=True)
+        match_id = interaction.data['values'][0]
+        match = next((m for m in self.event["cricket_matches"] if m["match_id"] == match_id), None)
+        if match: await interaction.response.send_modal(CricketBetModal(match_id, match["team_a"], match["team_b"], self.ticket_id))
+
+# --- CORE USER COMMANDS ---
+@bot.command(name="prediction", aliases=["pred"], description="Open your Prediction Betslip.")
+async def prediction_prefix(ctx):
+    event = prediction_events_col.find_one({"status": "active"})
+    if not event:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} There is no active prediction event right now.", color=0xff0000))
+    
+    existing_ticket = prediction_tickets_col.find_one({"event_id": event["event_id"], "user_id": ctx.author.id, "status": "locked"})
+    if existing_ticket:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You already locked in your predictions for this event! Use `.myp` to view them.", color=0xe67e22))
+
+    ticket_id = f"PRED-{str(uuid.uuid4())[:6].upper()}"
+    prediction_tickets_col.insert_one({"ticket_id": ticket_id, "event_id": event["event_id"], "user_id": ctx.author.id, "status": "draft", "bets": []})
+
+    desc = f"{E_ARROW} Select a match from the dropdown menus below to build your betslip.\n\n"
+    
+    if event.get("football_matches"):
+        desc += f"**{E_FIRE} FOOTBALL MARKETS**\n"
+        for m in event["football_matches"]: desc += f"{E_ARROW} {m['team_a']} vs {m['team_b']} `[ {E_TIMER} {m['time_limit']} ]`\n"
+        
+    if event.get("cricket_matches"):
+        desc += f"\n**{E_STARS} CRICKET MARKETS**\n"
+        for m in event["cricket_matches"]: desc += f"{E_ARROW} {m['team_a']} vs {m['team_b']} `[ {E_TIMER} {m['time_limit']} ]`\n"
+
+    embed = discord.Embed(title=f"{E_CROWN} OFFICIAL ZE BOT BETTING MARKET", description=desc, color=0xf1c40f)
+    await ctx.send(embed=embed, view=UserPredictionView(event, ticket_id, ctx.author.id))
+
+@bot.command(name="mypredictions", aliases=["myp"], description="View your betting history.")
+async def mypredictions_prefix(ctx):
+    tickets = list(prediction_tickets_col.find({"user_id": ctx.author.id, "status": {"$ne": "draft"}}).sort("_id", -1).limit(10))
+    if not tickets:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You have no locked prediction tickets yet.", color=0xe67e22))
+        
+    desc = ""
+    for i, t in enumerate(tickets, 1):
+        desc += f"`{i}.` **{t['ticket_id']}** (Event #{t['event_id']}) - {E_GOLD_TICK} Locked\n"
+        
+    embed = discord.Embed(title=f"{E_ITEMBOX} YOUR BETTING HISTORY", description=desc, color=0x3498db)
+    await ctx.send(embed=embed)
+
+@bot.command(name="predictinfo", aliases=["pi"], description="Check the details of a specific ticket.")
+async def predictinfo_prefix(ctx, ticket_id: str):
+    ticket = prediction_tickets_col.find_one({"ticket_id": ticket_id.upper()})
+    if not ticket:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} Ticket `{ticket_id}` not found.", color=0xff0000))
+        
+    desc = f"**Event:** #{ticket['event_id']}\n**Status:** Locked {E_SUCCESS}\n\n"
+    for bet in ticket.get("bets", []):
+        icon = E_FIRE if bet["type"] == "football" else E_STARS
+        desc += f"{icon} **Match ID:** {bet['match_id']}\n{E_ARROW} **Prediction:** {bet['prediction']}\n{E_MONEY} **Wager:** {bet['wager_raw']}\n\n"
+        
+    desc += f"**{E_CHAT} Unpopular Opinion:**\n*{ticket.get('opinion', 'None')}*"
+    
+    embed = discord.Embed(title=f"{E_ITEMBOX} TICKET: {ticket_id.upper()}", description=desc, color=0x9b59b6)
+    await ctx.send(embed=embed)
+
+# ==========================================================
+# 🔮 PHASE 3: PROFILES, LEADERBOARDS & PAYOUT ENGINE
+# ==========================================================
+
+# --- HELPER: GET OR CREATE USER STATS ---
+def get_pred_user(user_id):
+    user = prediction_users_col.find_one({"user_id": user_id})
+    if not user:
+        user = {
+            "user_id": user_id, "points": 0, "events_played": 0, 
+            "streak": 0, "hattricks": 0, "pc_won": 0, "pc_lost": 0, 
+            "sc_won": 0, "sc_lost": 0, "ballon_dors": 0, "super_ballon_dors": 0
+        }
+        prediction_users_col.insert_one(user)
+    return user
+
+# --- ADMIN COMMANDS: LOGGING & OVERVIEW ---
+@bot.command(name="listpredictions", aliases=["lp"], description="View active tickets for the current event.")
+@commands.has_permissions(administrator=True)
+async def listpredictions_prefix(ctx):
+    event = prediction_events_col.find_one({"status": "active"})
+    if not event: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} No active event running.", color=0xff0000))
+    
+    tickets = list(prediction_tickets_col.find({"event_id": event["event_id"], "status": "locked"}))
+    desc = f"**Total Tickets Locked:** {len(tickets)}\n\n**Latest 10 Tickets:**\n"
+    
+    for t in tickets[-10:]:
+        desc += f"{E_ARROW} `{t['ticket_id']}` by <@{t['user_id']}>\n"
+        
+    embed = discord.Embed(title=f"{E_ADMIN} EVENT #{event['event_id']} OVERVIEW", description=desc, color=0x3498db)
+    await ctx.send(embed=embed)
+
+@bot.command(name="logprediction", description="Manually log a ticket to the thread.")
+@commands.has_permissions(administrator=True)
+async def logprediction_prefix(ctx, ticket_id: str):
+    ticket = prediction_tickets_col.find_one({"ticket_id": ticket_id.upper()})
+    if not ticket: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} Ticket not found.", color=0xff0000))
+    
+    log_channel = ctx.guild.get_thread(PREDICTION_LOG_CHANNEL_ID) or ctx.guild.get_channel(PREDICTION_LOG_CHANNEL_ID)
+    if not log_channel: return await ctx.send(f"{E_ERROR} Log channel not found.")
+    
+    log_embed = discord.Embed(title=f"{E_ITEMBOX} PREDICTION LOG (MANUAL)", description=f"**Ticket ID:** `{ticket['ticket_id']}` | **User:** <@{ticket['user_id']}>", color=0x2ecc71)
+    for bet in ticket.get("bets", []):
+        icon = E_FIRE if bet["type"] == "football" else E_STARS
+        log_embed.add_field(name=f"{icon} Match: {bet['match_id']}", value=f"{E_ARROW} **Predict:** {bet['prediction']}\n{E_MONEY} **Stake:** {bet['wager_raw']}", inline=False)
+    log_embed.add_field(name=f"{E_CHAT} Bold Take:", value=f"*{ticket.get('opinion', 'None')}*", inline=False)
+    
+    await log_channel.send(embed=log_embed)
+    await ctx.send(f"{E_SUCCESS} Logged to thread successfully.")
+
+# --- USER COMMANDS: PROFILE & LEADERBOARD ---
+@bot.command(name="predictionprofile", aliases=["pp"], description="View your Prediction Career Stats.")
+async def predictionprofile_prefix(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    user = get_pred_user(target.id)
+    
+    net_pc = user['pc_won'] - user['pc_lost']
+    net_sc = user['sc_won'] - user['sc_lost']
+    
+    desc = f"**{E_ACTIVE} Overall Stats**\n"
+    desc += f"{E_ARROW} **Total Points:** {user['points']}\n"
+    desc += f"{E_ARROW} **Events Played:** {user['events_played']}\n"
+    desc += f"{E_ARROW} **Current Streak:** {E_FIRE} {user['streak']} Matches\n"
+    desc += f"{E_ARROW} **Hattricks:** {E_STAR} {user['hattricks']}\n\n"
+    
+    desc += f"**{E_MONEY} Betting Ledger**\n"
+    desc += f"{E_ARROW} **Net PC Profit:** {net_pc:,} PC\n"
+    desc += f"{E_ARROW} **Net SC Profit:** {net_sc:,} SC\n\n"
+    
+    desc += f"**{E_CROWN} Trophy Cabinet**\n"
+    desc += f"{E_ARROW} **Ballon d'Ors:** {user['ballon_dors']}\n"
+    desc += f"{E_ARROW} **Super Ballon d'Ors:** {user['super_ballon_dors']}\n"
+    
+    embed = discord.Embed(title=f"{E_PREMIUM} PREDICTION CAREER: {target.display_name}", description=desc, color=0xf1c40f)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await ctx.send(embed=embed)
+
+class LBSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Top Points", value="points", emoji=discord.PartialEmoji.from_str(E_STAR)),
+            discord.SelectOption(label="Most Hattricks", value="hattricks", emoji=discord.PartialEmoji.from_str(E_FIRE)),
+            discord.SelectOption(label="Best Streak", value="streak", emoji=discord.PartialEmoji.from_str(E_ACTIVE))
+        ]
+        super().__init__(placeholder="Select Leaderboard Category...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        sort_field = self.values[0]
+        top_users = list(prediction_users_col.find().sort(sort_field, -1).limit(10))
+        
+        desc = ""
+        for i, u in enumerate(top_users, 1):
+            val = u.get(sort_field, 0)
+            desc += f"`{i}.` <@{u['user_id']}> - **{val} {sort_field.capitalize()}**\n"
+            
+        embed = discord.Embed(title=f"{E_CROWN} GLOBAL LEADERBOARD: {sort_field.upper()}", description=desc, color=0xf1c40f)
+        await interaction.response.edit_message(embed=embed)
+
+class LBView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(LBSelect())
+
+@bot.command(name="predictionleaderboard", aliases=["predictlb", "plb"])
+async def predictlb_prefix(ctx):
+    embed = discord.Embed(title=f"{E_CROWN} GLOBAL PREDICTION LEADERBOARD", description=f"{E_ARROW} Select a category from the dropdown below to view the top predictors.", color=0xf1c40f)
+    await ctx.send(embed=embed, view=LBView())
+
+# --- THE SETTLEMENT ENGINE (PAYOUTS) ---
+class SettleMatchModal(discord.ui.Modal):
+    def __init__(self, match_id, match_type, team_a, team_b, event_id):
+        super().__init__(title=f"Settle: {team_a[:10]} vs {team_b[:10]}")
+        self.match_id = match_id
+        self.match_type = match_type
+        self.event_id = event_id
+        
+        placeholder = "e.g., 3-1" if match_type == "football" else f"e.g., Win: {team_a} (210/4)"
+        self.result = discord.ui.TextInput(label="Enter Exact Final Score/Result", placeholder=placeholder)
+        self.add_item(self.result)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        field = "football_matches" if self.match_type == "football" else "cricket_matches"
+        prediction_events_col.update_one(
+            {"event_id": self.event_id, f"{field}.match_id": self.match_id},
+            {"$set": {f"{field}.$.result": self.result.value, f"{field}.$.status": "settled"}}
+        )
+        await interaction.response.send_message(f"{E_SUCCESS} Score locked for match!", ephemeral=True)
+
+class SettleEventView(discord.ui.View):
+    def __init__(self, event):
+        super().__init__(timeout=None)
+        self.event = event
+        
+        # Add buttons for every match
+        for m in event.get("football_matches", []):
+            status = E_GOLD_TICK if m.get("status") == "settled" else E_ERROR
+            btn = discord.ui.Button(label=f"Settle: {m['team_a']} (FB)", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(status))
+            btn.callback = self.make_callback(m['match_id'], "football", m['team_a'], m['team_b'])
+            self.add_item(btn)
+            
+        for m in event.get("cricket_matches", []):
+            status = E_GOLD_TICK if m.get("status") == "settled" else E_ERROR
+            btn = discord.ui.Button(label=f"Settle: {m['team_a']} (CR)", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(status))
+            btn.callback = self.make_callback(m['match_id'], "cricket", m['team_a'], m['team_b'])
+            self.add_item(btn)
+
+    def make_callback(self, match_id, match_type, team_a, team_b):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.send_modal(SettleMatchModal(match_id, match_type, team_a, team_b, self.event["event_id"]))
+        return callback
+
+    @discord.ui.button(label="PROCESS PAYOUTS & ANNOUNCE", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_MONEY), row=4)
+    async def process_payouts(self, interaction: discord.Interaction, button: discord.ui.Button):
+        prediction_events_col.update_one({"event_id": self.event["event_id"]}, {"$set": {"status": "closed"}})
+        tickets = list(prediction_tickets_col.find({"event_id": self.event["event_id"], "status": "locked"}))
+        
+        # Build Result Map
+        results = {}
+        for m in self.event.get("football_matches", []) + self.event.get("cricket_matches", []):
+            results[m["match_id"]] = m.get("result", "")
+
+        hattrick_users = []
+        streak_users = []
+
+        # Process Every Ticket
+        for t in tickets:
+            user = get_pred_user(t["user_id"])
+            correct_guesses = 0
+            
+            for bet in t.get("bets", []):
+                if bet["prediction"].lower().strip() == results.get(bet["match_id"], "").lower().strip():
+                    correct_guesses += 1
+            
+            # Update Points & Streaks
+            new_points = user["points"] + correct_guesses + 1 # +1 for opinion
+            new_streak = user["streak"] + 1 if correct_guesses > 0 else 0
+            new_hattricks = user["hattricks"] + 1 if correct_guesses >= 3 else user["hattricks"]
+            
+            if correct_guesses >= 3: hattrick_users.append(t["user_id"])
+            if new_streak >= 3: streak_users.append((t["user_id"], new_streak))
+
+            prediction_users_col.update_one(
+                {"user_id": t["user_id"]},
+                {"$set": {"points": new_points, "streak": new_streak, "hattricks": new_hattricks}, "$inc": {"events_played": 1}}
+            )
+
+        # Build Grand Announcement
+        desc = f"The real-life matches have concluded! Points and streaks have been updated.\n*(Manual PC/SC distributions for winners will be processed by Admins based on the logs).*\n\n"
+        
+        if hattrick_users or streak_users:
+            desc += f"**{E_FIRE} LEGACY HIGHLIGHTS {E_FIRE}**\n"
+            for uid in hattrick_users: desc += f"{E_ARROW} <@{uid}> scored a **HATTRICK**! {E_STAR}\n"
+            for uid, s in streak_users: desc += f"{E_ARROW} <@{uid}> is on a **{s}-Match Streak**! {E_ACTIVE}\n"
+            
+        desc += f"\n*Use `.pp` to view your updated Career Stats!*"
+        
+        embed = discord.Embed(title=f"{E_CROWN} EVENT #{self.event['event_id']} RESULTS ARE IN!", description=desc, color=0x2ecc71)
+        await interaction.channel.send(content=f"{E_ALERT} {PREDICTION_PING_ROLE} **THE RESULTS ARE IN!**", embed=embed)
+        await interaction.message.delete()
+        await interaction.response.send_message(f"{E_SUCCESS} Event officially closed and announced!", ephemeral=True)
+
+@bot.command(name="settleevent", aliases=["se"], description="Settle the active prediction event.")
+@commands.has_permissions(administrator=True)
+async def settleevent_prefix(ctx):
+    event = prediction_events_col.find_one({"status": "active"})
+    if not event: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} No active event to settle.", color=0xff0000))
+    
+    embed = discord.Embed(title=f"{E_ADMIN} EVENT SETTLEMENT PANEL", description=f"{E_ARROW} Click the buttons to input real-life scores. Once all are green, click Process Payouts.", color=0xe67e22)
 
 # ==============================================================================
 #  PHASE 2: DUELIST TRANSFERS & CONTRACTS UI
