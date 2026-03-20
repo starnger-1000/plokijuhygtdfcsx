@@ -1442,7 +1442,7 @@ async def mypredictions_prefix(ctx):
     embed = discord.Embed(title=f"{E_ITEMBOX} YOUR BETTING HISTORY", description=desc, color=0x3498db)
     await ctx.send(embed=embed)
 
-@bot.command(name="predictinfo", aliases=["pi"], description="Check the details of a specific ticket.")
+@bot.command(name="predictinfo", aliases=["predicti"], description="Check the details of a specific ticket.")
 async def predictinfo_prefix(ctx, ticket_id: str):
     ticket = prediction_tickets_col.find_one({"ticket_id": ticket_id.upper()})
     if not ticket:
