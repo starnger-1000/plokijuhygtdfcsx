@@ -1675,15 +1675,16 @@ async def settleevent_prefix(ctx):
 # ==========================================================
 
 # --- TIMEZONE HELPER ---
+# --- TIMEZONE HELPER ---
 def parse_ist_to_unix(time_str):
-    # Converts a string like "08:30 PM" (IST) into a UTC Unix Timestamp for Discord
-    IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-    now_ist = datetime.datetime.now(IST)
+    import datetime as dt # This isolates the import so it never crashes!
+    IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now_ist = dt.datetime.now(IST)
     try:
-        parsed_time = datetime.datetime.strptime(time_str.strip(), "%I:%M %p").time()
-        event_dt = datetime.datetime.combine(now_ist.date(), parsed_time, tzinfo=IST)
+        parsed_time = dt.datetime.strptime(time_str.strip(), "%I:%M %p").time()
+        event_dt = dt.datetime.combine(now_ist.date(), parsed_time, tzinfo=IST)
         if event_dt < now_ist:
-            event_dt += datetime.timedelta(days=1) # Push to next day if time passed
+            event_dt += dt.timedelta(days=1) # Push to next day if time passed
         return int(event_dt.timestamp())
     except ValueError:
         return None
@@ -1832,7 +1833,7 @@ async def schedule_prefix(ctx):
 # --- BACKGROUND TASK: DM REMINDERS ---
 @tasks.loop(minutes=1)
 async def check_schedule_reminders():
-    current_unix = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    current_unix = int(discord.utils.utcnow().timestamp())
     
     # Check for events happening within the next 2 minutes
     upcoming_events = list(schedule_events_col.find({"status": "published", "unix_time": {"$lte": current_unix + 60}, "notified": {"$ne": True}}))
