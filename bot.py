@@ -209,6 +209,9 @@ if db is not None:
     prediction_events_col = db["prediction_events"]
     prediction_tickets_col = db["prediction_tickets"]
     prediction_users_col = db["prediction_users"]
+    schedule_events_col = db["schedule_events"]
+    schedule_reminders_col = db["schedule_reminders"]
+    tournaments_col = db["tournaments"]
 
 PREDICTION_PING_ROLE = "<@&1458516530739286111>"
 PREDICTION_LOG_CHANNEL_ID = 1445461752094396446
@@ -1666,6 +1669,365 @@ async def settleevent_prefix(ctx):
     if not event: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} No active event to settle.", color=0xff0000))
     
     embed = discord.Embed(title=f"{E_ADMIN} EVENT SETTLEMENT PANEL", description=f"{E_ARROW} Click the buttons to input real-life scores. Once all are green, click Process Payouts.", color=0xe67e22)
+
+# ==========================================================
+# 📅 PREMIUM SERVER SCHEDULE & REMINDER SYSTEM
+# ==========================================================
+
+# --- TIMEZONE HELPER ---
+def parse_ist_to_unix(time_str):
+    # Converts a string like "08:30 PM" (IST) into a UTC Unix Timestamp for Discord
+    IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    now_ist = datetime.datetime.now(IST)
+    try:
+        parsed_time = datetime.datetime.strptime(time_str.strip(), "%I:%M %p").time()
+        event_dt = datetime.datetime.combine(now_ist.date(), parsed_time, tzinfo=IST)
+        if event_dt < now_ist:
+            event_dt += datetime.timedelta(days=1) # Push to next day if time passed
+        return int(event_dt.timestamp())
+    except ValueError:
+        return None
+
+#  --- ADMIN: SCHEDULE BUILDER MODALS & VIEWS ---
+class AddEventModal(discord.ui.Modal, title="Add Scheduled Event"):
+    category = discord.ui.TextInput(label="Category/Section", placeholder="e.g., Tournaments, Giveaways, Voice Chats")
+    event_name = discord.ui.TextInput(label="Event Name", placeholder="e.g., Pokemon Tournament")
+    channel_name = discord.ui.TextInput(label="Channel (with #)", placeholder="e.g., #general or #events")
+    ist_time = discord.ui.TextInput(label="Time in IST (HH:MM AM/PM)", placeholder="e.g., 08:30 PM")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        unix_time = parse_ist_to_unix(self.ist_time.value)
+        if not unix_time:
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ERROR} Invalid time format. Please use `HH:MM AM/PM`.", color=0xff0000), ephemeral=True)
+            
+        event_data = {
+            "event_id": str(uuid.uuid4())[:6],
+            "category": self.category.value,
+            "name": self.event_name.value,
+            "channel": self.channel_name.value,
+            "unix_time": unix_time,
+            "status": "draft"
+        }
+        schedule_events_col.insert_one(event_data)
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} **{self.event_name.value}** added to draft!", color=0x2ecc71), ephemeral=True)
+
+class AdminScheduleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Add Event / Section", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_ACTIVE), row=1)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddEventModal())
+
+    @discord.ui.button(label="Reset Schedule", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR), row=1)
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        schedule_events_col.delete_many({})
+        schedule_reminders_col.delete_many({})
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} Schedule completely reset.", color=0x2ecc71), ephemeral=True)
+
+    @discord.ui.button(label="Confirm & Publish", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_GOLD_TICK), row=2)
+    async def publish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        schedule_events_col.update_many({"status": "draft"}, {"$set": {"status": "published"}})
+        await interaction.response.edit_message(embed=discord.Embed(description=f"{E_SUCCESS} Schedule successfully published! Users can now use `.schedule`.", color=0x2ecc71), view=None)
+
+    @discord.ui.button(label="Decline & Cancel", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_ERROR), row=2)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        schedule_events_col.delete_many({"status": "draft"})
+        await interaction.response.edit_message(embed=discord.Embed(description=f"{E_ERROR} Schedule draft cancelled.", color=0xff0000), view=None)
+
+# --- USER: REMINDER DROPDOWN & VIEWS ---
+class ReminderSelect(discord.ui.Select):
+    def __init__(self, events):
+        options = []
+        for e in events[:25]:
+            options.append(discord.SelectOption(label=f"[{e['category']}] {e['name']}", description=f"In {e['channel']}", value=e['event_id'], emoji=discord.PartialEmoji.from_str(E_TIMER)))
+        super().__init__(placeholder="Select an event to get reminded...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        event_id = self.values[0]
+        schedule_reminders_col.update_one({"user_id": interaction.user.id, "event_id": event_id}, {"$set": {"active": True}}, upsert=True)
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} Reminder set! I will DM you when the event starts.", color=0x2ecc71), ephemeral=True)
+
+class UserScheduleView(discord.ui.View):
+    def __init__(self, events, pages, current_page):
+        super().__init__(timeout=None)
+        self.events = events
+        self.pages = pages
+        self.current_page = current_page
+        
+        # Reminder Button
+        remind_btn = discord.ui.Button(label="Set up a reminder", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ALERT), row=1)
+        remind_btn.callback = self.remind_callback
+        self.add_item(remind_btn)
+        
+        # Pagination Buttons
+        if len(pages) > 1:
+            prev_btn = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_ARROW), row=2)
+            prev_btn.callback = self.prev_callback
+            next_btn = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_ARROW), row=2)
+            next_btn.callback = self.next_callback
+            self.add_item(prev_btn)
+            self.add_item(next_btn)
+
+    async def remind_callback(self, interaction: discord.Interaction):
+        view = discord.ui.View()
+        view.add_item(ReminderSelect(self.events))
+        await interaction.response.send_message(embed=discord.Embed(title=f"{E_ALERT} SETUP REMINDER", description=f"{E_ARROW} Choose an event below:", color=0xf1c40f), view=view, ephemeral=True)
+
+    async def prev_callback(self, interaction: discord.Interaction):
+        self.current_page = max(0, self.current_page - 1)
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    async def next_callback(self, interaction: discord.Interaction):
+        self.current_page = min(len(self.pages) - 1, self.current_page + 1)
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+# --- COMMANDS ---
+@bot.command(name="setschedule", aliases=["ssched"], description="Admin: Setup the daily event schedule.")
+@commands.has_permissions(administrator=True)
+async def setschedule_prefix(ctx):
+    drafts = list(schedule_events_col.find({"status": "draft"}))
+    desc = f"{E_ARROW} Click the button below to add events. When finished, click Confirm & Publish.\n\n**Current Draft:**\n"
+    
+    if not drafts:
+        desc += "*No events added yet.*"
+    else:
+        categories = {}
+        for d in drafts: categories.setdefault(d["category"], []).append(d)
+        for cat, evts in categories.items():
+            desc += f"**{E_ITEMBOX} {cat}**\n"
+            for e in evts: desc += f"{E_ARROW} {e['name']} - {e['channel']} (<t:{e['unix_time']}:t>)\n"
+            
+    embed = discord.Embed(title=f"{E_ADMIN} SCHEDULE CONTROL PANEL", description=desc, color=0xe67e22)
+    await ctx.send(embed=embed, view=AdminScheduleView())
+
+@bot.command(name="schedule", aliases=["sched"], description="View today's event schedule.")
+async def schedule_prefix(ctx):
+    events = list(schedule_events_col.find({"status": "published"}).sort("unix_time", 1))
+    if not events:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} There is no schedule published for today yet.", color=0xe67e22))
+
+    categories = {}
+    for e in events: categories.setdefault(e["category"], []).append(e)
+
+    pages = []
+    current_desc = ""
+    for cat, evts in categories.items():
+        cat_str = f"**{E_ITEMBOX} {cat.upper()}**\n"
+        for e in evts:
+            # <t:UNIX:t> shows local time, <t:UNIX:R> shows relative time (e.g. "in 2 hours")
+            cat_str += f"{E_ARROW} **{e['name']}** in {e['channel']}\n{E_TIMER} Time: <t:{e['unix_time']}:t> (<t:{e['unix_time']}:R>)\n\n"
+        
+        if len(current_desc) + len(cat_str) > 3000:
+            pages.append(discord.Embed(title=f"{E_CROWN} DAILY SERVER SCHEDULE", description=current_desc, color=0x3498db))
+            current_desc = cat_str
+        else:
+            current_desc += cat_str
+
+    if current_desc:
+        pages.append(discord.Embed(title=f"{E_CROWN} DAILY SERVER SCHEDULE", description=current_desc, color=0x3498db))
+
+    await ctx.send(embed=pages[0], view=UserScheduleView(events, pages, 0))
+
+# --- BACKGROUND TASK: DM REMINDERS ---
+@tasks.loop(minutes=1)
+async def check_schedule_reminders():
+    current_unix = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    
+    # Check for events happening within the next 2 minutes
+    upcoming_events = list(schedule_events_col.find({"status": "published", "unix_time": {"$lte": current_unix + 60}, "notified": {"$ne": True}}))
+    
+    for event in upcoming_events:
+        reminders = list(schedule_reminders_col.find({"event_id": event["event_id"], "active": True}))
+        
+        for r in reminders:
+            user = bot.get_user(r["user_id"])
+            if user:
+                embed = discord.Embed(title=f"{E_ALERT} EVENT STARTING NOW!", description=f"{E_ARROW} **{event['name']}** is starting right now in **{event['channel']}**!", color=0xf1c40f)
+                try:
+                    await user.send(embed=embed)
+                except discord.Forbidden:
+                    pass # User has DMs disabled
+                    
+        # Mark event as notified so we don't spam DMs
+        schedule_events_col.update_one({"_id": event["_id"]}, {"$set": {"notified": True}})
+
+# Start the background loop when the bot boots up
+@bot.listen('on_ready')
+async def start_reminder_loop():
+    if not check_schedule_reminders.is_running():
+        check_schedule_reminders.start()
+
+# ==========================================================
+# 🏆 PREMIUM TOURNAMENT & ONGOING EVENTS SYSTEM 
+# ==========================================================
+
+# --- ADMIN: SETUP TOURNAMENT MODALS & VIEWS ---
+class TournMainModal(discord.ui.Modal, title="Setup Main Page"):
+    def __init__(self, draft_id):
+        super().__init__()
+        self.draft_id = draft_id
+        
+    t_name = discord.ui.TextInput(label="Dropdown Name", placeholder="e.g., Galar Cup 2026", max_length=50)
+    t_title = discord.ui.TextInput(label="Embed Title", placeholder="e.g., The Ultimate Galar Tournament", max_length=100)
+    t_desc = discord.ui.TextInput(label="Embed Description", style=discord.TextStyle.paragraph, placeholder="Type the main announcement here...")
+    t_thumb = discord.ui.TextInput(label="Thumbnail URL (Optional)", placeholder="https://link-to-small-image.png", required=False)
+    t_img = discord.ui.TextInput(label="Large Image URL (Optional)", placeholder="https://link-to-large-bottom-image.png", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        tournaments_col.update_one(
+            {"tourn_id": self.draft_id},
+            {"$set": {
+                "name": self.t_name.value, 
+                "title": self.t_title.value, 
+                "desc": self.t_desc.value, 
+                "thumbnail": self.t_thumb.value,
+                "image": self.t_img.value,
+                "status": "draft"
+            }},
+            upsert=True
+        )
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} Main page & images saved to draft!", color=0x2ecc71), ephemeral=True)
+
+class TournButtonModal(discord.ui.Modal, title="Add Info Button"):
+    def __init__(self, draft_id):
+        super().__init__()
+        self.draft_id = draft_id
+        
+    btn_label = discord.ui.TextInput(label="Button Name", placeholder="e.g., Rules, Prizes, Registration", max_length=30)
+    btn_content = discord.ui.TextInput(label="Hidden Info Message", style=discord.TextStyle.paragraph, placeholder="Type the detailed info that users will see secretly...")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_btn = {"label": self.btn_label.value, "content": self.btn_content.value}
+        tournaments_col.update_one(
+            {"tourn_id": self.draft_id},
+            {"$push": {"buttons": new_btn}},
+            upsert=True
+        )
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} Added **{self.btn_label.value}** button to draft!", color=0x2ecc71), ephemeral=True)
+
+class TournRemoveSelect(discord.ui.Select):
+    def __init__(self, tournaments):
+        options = [discord.SelectOption(label=t.get("name", "Unknown"), value=t["tourn_id"], emoji=discord.PartialEmoji.from_str(E_ITEMBOX)) for t in tournaments[:25]]
+        super().__init__(placeholder="Select a tournament to delete...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        tournaments_col.delete_one({"tourn_id": self.values[0]})
+        await interaction.response.send_message(embed=discord.Embed(description=f"{E_SUCCESS} Tournament successfully deleted.", color=0x2ecc71), ephemeral=True)
+
+class TournRemoveView(discord.ui.View):
+    def __init__(self, tournaments):
+        super().__init__(timeout=None)
+        self.add_item(TournRemoveSelect(tournaments))
+
+class AdminTournSetupView(discord.ui.View):
+    def __init__(self, draft_id):
+        super().__init__(timeout=None)
+        self.draft_id = draft_id
+
+    @discord.ui.button(label="Setup Main Page", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_BOOK), row=1)
+    async def add_main_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TournMainModal(self.draft_id))
+
+    @discord.ui.button(label="Add Info Button", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_CHAT), row=1)
+    async def add_info_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TournButtonModal(self.draft_id))
+
+    @discord.ui.button(label="Remove Tournament", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR), row=1)
+    async def remove_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tournaments = list(tournaments_col.find())
+        if not tournaments:
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ALERT} No tournaments found.", color=0xe67e22), ephemeral=True)
+        await interaction.response.send_message(embed=discord.Embed(title=f"{E_ADMIN} DELETE TOURNAMENT", description=f"{E_ARROW} Choose an announcement to remove:", color=0xff0000), view=TournRemoveView(tournaments), ephemeral=True)
+
+    @discord.ui.button(label="Preview Embed", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_STAR), row=2)
+    async def preview_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tourn = tournaments_col.find_one({"tourn_id": self.draft_id})
+        if not tourn or not tourn.get("title"):
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ERROR} You must setup the Main Page first!", color=0xff0000), ephemeral=True)
+        
+        embed = discord.Embed(title=f"{E_CROWN} {tourn['title']}", description=tourn['desc'], color=0xf1c40f)
+        if tourn.get("thumbnail"): embed.set_thumbnail(url=tourn["thumbnail"])
+        if tourn.get("image"): embed.set_image(url=tourn["image"])
+        
+        # Build mock buttons just for visual preview
+        view = discord.ui.View()
+        for btn_data in tourn.get("buttons", []):
+            view.add_item(discord.ui.Button(label=btn_data["label"], style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_ARROW), disabled=True))
+            
+        await interaction.response.send_message(content=f"{E_ACTIVE} **LIVE PREVIEW**", embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Confirm & Publish", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(CONFIRM_EMOJI), row=2)
+    async def publish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tourn = tournaments_col.find_one({"tourn_id": self.draft_id})
+        if not tourn or not tourn.get("name"):
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ERROR} You must setup the Main Page first!", color=0xff0000), ephemeral=True)
+            
+        tournaments_col.update_one({"tourn_id": self.draft_id}, {"$set": {"status": "published"}})
+        await interaction.response.edit_message(embed=discord.Embed(description=f"{E_SUCCESS} Tournament officially published! Users can now use `.tournament`.", color=0x2ecc71), view=None)
+
+    @discord.ui.button(label="Decline & Cancel", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(DENY_EMOJI), row=2)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tournaments_col.delete_one({"tourn_id": self.draft_id})
+        await interaction.response.edit_message(embed=discord.Embed(description=f"{E_ERROR} Tournament draft cancelled.", color=0xff0000), view=None)
+
+# --- USER: TOURNAMENT DISPLAY VIEWS ---
+def make_tourn_info_callback(content):
+    async def callback(interaction: discord.Interaction):
+        embed = discord.Embed(title=f"{E_BOOK} TOURNAMENT INFO", description=content, color=0x3498db)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    return callback
+
+class UserTournSelect(discord.ui.Select):
+    def __init__(self, tournaments):
+        options = [discord.SelectOption(label=t["name"], value=t["tourn_id"], emoji=discord.PartialEmoji.from_str(E_CROWN)) for t in tournaments[:25]]
+        super().__init__(placeholder="Select a tournament or event...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        tourn = tournaments_col.find_one({"tourn_id": self.values[0]})
+        if not tourn:
+            return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ERROR} Tournament no longer exists.", color=0xff0000), ephemeral=True)
+
+        embed = discord.Embed(title=f"{E_CROWN} {tourn.get('title', tourn['name'])}", description=tourn.get('desc', 'No description provided.'), color=0xf1c40f)
+        if tourn.get("thumbnail"): embed.set_thumbnail(url=tourn["thumbnail"])
+        if tourn.get("image"): embed.set_image(url=tourn["image"])
+        
+        view = discord.ui.View(timeout=None)
+        for i, btn_data in enumerate(tourn.get("buttons", [])):
+            btn = discord.ui.Button(label=btn_data["label"], style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_ARROW))
+            btn.callback = make_tourn_info_callback(btn_data["content"])
+            view.add_item(btn)
+            
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class UserTournView(discord.ui.View):
+    def __init__(self, tournaments):
+        super().__init__(timeout=None)
+        self.add_item(UserTournSelect(tournaments))
+
+# --- COMMANDS ---
+@bot.command(name="setuptournaments", aliases=["stourn"], description="Admin: Setup tournament announcements.")
+@commands.has_permissions(administrator=True)
+async def setuptournaments_prefix(ctx):
+    draft_id = str(uuid.uuid4())[:8]
+    embed = discord.Embed(title=f"{E_ADMIN} TOURNAMENT BUILDER", description=f"{E_ARROW} Use the buttons below to draft the announcement and attach hidden info buttons.", color=0xe67e22)
+    await ctx.send(embed=embed, view=AdminTournSetupView(draft_id))
+
+@bot.tree.command(name="setuptournaments", description="Admin: Setup tournament announcements.")
+@discord.app_commands.default_permissions(administrator=True)
+async def setuptournaments_slash(interaction: discord.Interaction):
+    draft_id = str(uuid.uuid4())[:8]
+    embed = discord.Embed(title=f"{E_ADMIN} TOURNAMENT BUILDER", description=f"{E_ARROW} Use the buttons below to draft the announcement and attach hidden info buttons.", color=0xe67e22)
+    await interaction.response.send_message(embed=embed, view=AdminTournSetupView(draft_id))
+
+@bot.command(name="tournament", aliases=["ongoingevent"], description="View ongoing tournaments and events.")
+async def tournament_prefix(ctx):
+    tournaments = list(tournaments_col.find({"status": "published"}))
+    if not tournaments:
+        return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} There are no ongoing tournaments at the moment.", color=0xe67e22))
+        
+    embed = discord.Embed(title=f"{E_CROWN} ONGOING EVENTS", description=f"{E_ARROW} Select a tournament from the dropdown below to view details.", color=0x3498db)
+    await ctx.send(embed=embed, view=UserTournView(tournaments))
 
 # ==============================================================================
 #  PHASE 2: DUELIST TRANSFERS & CONTRACTS UI
