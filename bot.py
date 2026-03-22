@@ -1188,29 +1188,37 @@ async def pc_claim_alert_task():
 
 # --- HELPER: GET OR CREATE GAMBLE PROFILE ---
 def get_gamble_profile(user_id):
-    profile = gamble_profiles_col.find_one({"user_id": user_id})
+    # Force ID to string so it matches our new DB standard
+    uid = str(user_id)
+    profile = gamble_profiles_col.find_one({"user_id": uid})
     if not profile:
         profile = {
-            "user_id": user_id, "net_profit": 0, "total_wagered": 0,
+            "user_id": uid, "net_profit": 0, "total_wagered": 0,
             "games_played": 0, "biggest_win": 0, "biggest_loss": 0,
             "game_stats": {
                 "high_low": {"wins": 0, "played": 0}, "death_roll": {"wins": 0, "played": 0},
                 "slots": {"wins": 0, "played": 0}, "roulette": {"wins": 0, "played": 0}
             }
         }
+        gamble_profiles_col.insert_one(profile) # Actually save it if new
     return profile
 
-async def update_casino_balance(user_id, amount, currency_type):
+async def update_casino_balance(user_id, amount: int, currency: str):
     """
-    Directly updates the wallets_col. 
-    'amount' can be positive (win) or negative (loss/wager).
+    Safely adds or deducts money from the personal_wallets database 
+    using the exact document _id to prevent ghost wallets.
     """
-    # Ensure we use String IDs as per your wallet logic
-    query = {"user_id": str(user_id)}
-    update = {"$inc": {currency_type: amount}}
+    # 1. Use your existing smart fetcher to find the exact wallet (handles str/int ID issues)
+    w = get_wallet(user_id)
     
-    # This matches your get_wallet logic (creates if missing, though they should have one to play)
-    wallets_col.update_one(query, update, upsert=True)
+    if not w:
+        return # Safety catch
+        
+    # 2. Use the exact, unique MongoDB "_id" to update the balance, pc, or shiny_coins
+    wallets_col.update_one(
+        {"_id": w["_id"]}, 
+        {"$inc": {currency: amount}}
+    )
 
 # --- CASINO AUTO-LOGGER ---
 async def log_casino_receipt(bot, match_id):
@@ -1284,9 +1292,13 @@ class GambleLBSelect(discord.ui.Select):
         desc = f"{E_ARROW} Category: **{self.values[0].replace('_', ' ').title()}**\n\n"
         for i, p in enumerate(top_players, 1):
             val = p.get('net_profit', 0) if self.values[0] == "profit" else p.get('game_stats', {}).get(self.values[0], {}).get('wins', 0)
-            sign = "+" if self.values[0] == "profit" and val >= 0 else ""
-            name = bot.get_user(p["user_id"])
-            name = name.display_name if name else f"Ze Bot {i}" if p["user_id"] < 100 else "Unknown"
+            sign = "+" if (self.values[0] == "profit" and val >= 0) else ""
+            
+            # Better User Fetching
+            user_id = int(p["user_id"])
+            user = interaction.guild.get_member(user_id)
+            name = user.display_name if user else f"User({user_id})"
+            
             desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{val:,})\n"
             
         embed = discord.Embed(title=f"{E_CROWN} HIGH ROLLER HALL OF FAME", description=desc or "No data yet.", color=0xf1c40f)
@@ -1330,26 +1342,29 @@ async def loggamble_prefix(ctx, match_id: str):
 
 @bot.command(name="listgambles", aliases=["lgs"], description="View your recent gambling history.")
 async def listgambles_prefix(ctx):
-    history = list(gamble_history_col.find({"players": ctx.author.id}).sort("timestamp", -1).limit(10))
-    if not history: return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You haven't played any games yet.", color=0xe67e22))
+    # PINPOINTED FIX: We cast the ID to str() so MongoDB finds the record
+    uid = str(ctx.author.id)
+    history = list(gamble_history_col.find({"players": uid}).sort("timestamp", -1).limit(10))
+    
+    if not history: 
+        return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You haven't played any games yet.", color=0xe67e22))
     
     desc = ""
     for h in history:
-        user_res = next((r for r in h["results"] if r.get("id") == ctx.author.id), None)
+        # Match the ID as a string here too
+        user_res = next((r for r in h["results"] if str(r.get("id")) == uid), None)
         amt = user_res["amount"] if user_res else 0
         sign = "+" if amt > 0 else ""
         desc += f"{E_ARROW} `#{h['match_id']}` | {h['game'].title()} | **{sign}{amt:,}**\n"
     
-    await ctx.send(embed=discord.Embed(title=f"{E_ITEMBOX} {ctx.author.display_name}'s RECENT GAMES", description=desc, color=0x3498db))
+    embed = discord.Embed(title=f"{E_ITEMBOX} {ctx.author.display_name}'s RECENT GAMES", description=desc, color=0x3498db)
+    await ctx.send(embed=embed)
 
 # ==========================================================
 # 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
 # ========================================================== 
 
 # --- HIGH OR LOW GAME CLASS ---
-
-wallets_col = db["wallets"]
-
 class HighLowGameView(discord.ui.View):
     def __init__(self, host, players, wager, currency, pot):
         super().__init__(timeout=None)
@@ -1474,7 +1489,7 @@ class DeathRollGameView(discord.ui.View):
 
     async def init_game(self, interaction):
         for p in self.players:
-            if not p['is_bot']: users_col.update_one({"user_id": p['id']}, {"$inc": {self.currency: -self.wager}})
+            if not p['is_bot']: wallets_col.update_one({"user_id": p['id']}, {"$inc": {self.currency: -self.wager}})
         await self.render_state(interaction)
 
     async def render_state(self, interaction):
@@ -1801,23 +1816,70 @@ class WagerModal(discord.ui.Modal, title="Casino Buy-In"):
         except:
             await interaction.response.send_message(f"{E_ERROR} Invalid amount entered!", ephemeral=True)
 
+# --- DROPDOWNS ---
+class GameSelect(discord.ui.Select):
+    def __init__(self, host):
+        self.host = host
+        options = [
+            discord.SelectOption(label="Dice Roll", emoji=E_DICE, value="dice", default=True),
+            discord.SelectOption(label="Roulette", emoji=E_ROULETTE, value="roulette"),
+            discord.SelectOption(label="Slots", emoji=E_SLOTS, value="slots"),
+            discord.SelectOption(label="Death Roll", emoji=E_FIRE, value="death_roll") # Added Death Roll
+        ]
+        super().__init__(placeholder="Select Game", options=options, row=0)
 
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user != self.host:
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can change the game!", ephemeral=True)
+        self.view.game = self.values[0]
+        for opt in self.options: opt.default = (opt.value == self.values[0])
+        await self.view.update_lobby_embed(interaction)
+
+class CurrencySelect(discord.ui.Select):
+    def __init__(self, host):
+        self.host = host
+        options = [
+            discord.SelectOption(label="Cash", emoji=E_MONEY, value="balance", default=True),
+            discord.SelectOption(label="PokeCoins", emoji=E_PC, value="pc"),
+            discord.SelectOption(label="Shiny Coins", emoji=E_SHINY, value="shiny_coins")
+        ]
+        super().__init__(placeholder="Select Currency", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user != self.host:
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can change the currency!", ephemeral=True)
+        self.view.currency = self.values[0]
+        for opt in self.options: opt.default = (opt.value == self.values[0])
+        await self.view.update_lobby_embed(interaction)
+
+# --- PANEL ---
 class GamblePanel(discord.ui.View):
     def __init__(self, host, amount: int):
         super().__init__(timeout=60)
         self.host = host
         self.amount = amount
-        self.players = [host] # Real human players
-        self.bots = 0 # Counter for bot players
+        self.players = [host]
+        self.bots = 0
+        
+        # Default States & Tracking
+        self.game = "dice"
+        self.currency = "balance"
+        self.curr_emojis = {"balance": E_MONEY, "pc": E_PC, "shiny_coins": E_SHINY}
+        
+        # Added Death Roll configurations
+        self.game_names = {"dice": "Dice Roll", "roulette": "Roulette", "slots": "Slots", "death_roll": "Death Roll"}
+        self.game_emojis = {"dice": E_ROLL, "roulette": E_ROULETTE, "slots": E_SLOTS, "death_roll": E_FIRE}
 
-    # --- 1. JOIN BUTTON ---
-    @discord.ui.button(label="Join Gamble", emoji=E_DICE, style=discord.ButtonStyle.blurple, custom_id="join_gamble")
+        self.add_item(GameSelect(host))
+        self.add_item(CurrencySelect(host))
+
+    @discord.ui.button(label="Join", emoji=E_ACTIVE, style=discord.ButtonStyle.blurple, custom_id="join_gamble", row=2)
     async def join_gamble(self, interaction: discord.Interaction, button: discord.ui.Button):
         w = get_wallet(interaction.user.id)
-        user_balance = int(w.get("balance", 0)) if w else 0
+        user_balance = int(w.get(self.currency, 0)) if w else 0
 
         if user_balance < self.amount:
-            return await interaction.response.send_message(f"{E_ERROR} You don't have enough! You only have **${user_balance:,}**.", ephemeral=True)
+            return await interaction.response.send_message(f"{E_ERROR} You don't have enough {self.currency.replace('_', ' ').title()}! You only have **{user_balance:,}**.", ephemeral=True)
 
         if interaction.user in self.players:
             return await interaction.response.send_message(f"{E_ERROR} You're already in this gamble!", ephemeral=True)
@@ -1825,86 +1887,68 @@ class GamblePanel(discord.ui.View):
         self.players.append(interaction.user)
         await self.update_lobby_embed(interaction)
 
-    # --- 2. ADD BOT BUTTON (Host Only) ---
-    @discord.ui.button(label="Add Bot", emoji=E_ACTIVE, style=discord.ButtonStyle.secondary, custom_id="add_bot")
+    @discord.ui.button(label="Add Bot", style=discord.ButtonStyle.secondary, custom_id="add_bot", row=2)
     async def add_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.host:
             return await interaction.response.send_message(f"{E_ERROR} Only the host can add bots!", ephemeral=True)
-            
         self.bots += 1
         await self.update_lobby_embed(interaction)
 
-    # --- 3. START GAMBLE BUTTON (Host Only) ---
-    @discord.ui.button(label="Start Gamble", emoji=E_SUCCESS, style=discord.ButtonStyle.green, custom_id="start_gamble")
+    @discord.ui.button(label="Start Gamble", emoji=E_SUCCESS, style=discord.ButtonStyle.green, custom_id="start_gamble", row=2)
     async def start_gamble(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.host:
-            return await interaction.response.send_message(f"{E_ERROR} Only the host can start the gamble!", ephemeral=True)
-        
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
         if len(self.players) + self.bots < 2:
-            return await interaction.response.send_message(f"{E_ERROR} You need at least 2 players (or bots) to start!", ephemeral=True)
+            return await interaction.response.send_message(f"{E_ERROR} Need at least 2 players/bots!", ephemeral=True)
 
-        # Disable all buttons so no one else can join/click
-        for child in self.children:
-            child.disabled = True
-
-        # --- THE TRANSFORMATION: ROLLING PHASE ---
-        embed = interaction.message.embeds[0]
-        embed.color = 0xf1c40f # Gold/Yellow for suspense
-        embed.title = f"{E_ROLL} Rolling the Dice..."
-        embed.description = f"The pot is locked at **{E_MONEY} ${(len(self.players) + self.bots) * self.amount:,}**!"
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        # Suspense delay
-        await asyncio.sleep(3.5)
-
-        # --- LOGIC & PAYOUT PHASE ---
-        total_participants = self.players + [f"Bot {i+1}" for i in range(self.bots)]
-        winner = random.choice(total_participants)
+        for child in self.children: child.disabled = True
         pot_size = (len(self.players) + self.bots) * self.amount
 
-        # Deduct buy-in from all real players
+        # 1. Format the players exactly how your game engines need them
+        formatted_players = []
         for p in self.players:
-            wallets_col.update_one({"user_id": str(p.id)}, {"$inc": {"balance": -self.amount}})
+            formatted_players.append({"id": p.id, "name": p.display_name, "is_bot": False})
+        for i in range(self.bots):
+            formatted_players.append({"id": f"BOT_{i}", "name": f"Bot {i+1}", "is_bot": True})
 
-        # Reward winner if they are a real player
-        winner_text = ""
-        if isinstance(winner, discord.Member):
-            wallets_col.update_one({"user_id": str(winner.id)}, {"$inc": {"balance": pot_size}})
-            winner_text = f"{E_CROWN} **WINNER:** {winner.mention}\n{E_MONEY} **Won:** ${pot_size:,}"
-        else:
-            winner_text = f"{E_CROWN} **WINNER:** {winner} (The House Wins!)\n{E_MONEY} **Lost:** All player bets were taken."
+        # 2. Route to your actual animated game engines!
+        if self.game == "dice": 
+            view = HighLowGameView(self.host, formatted_players, self.amount, self.currency, pot_size)
+            embed = discord.Embed(title=f"{E_ROLL} Loading High/Low...", color=0xf1c40f)
+            await interaction.response.edit_message(embed=embed, view=view)
 
-        # --- THE TRANSFORMATION: RESULT PHASE ---
-        embed.color = 0x2ecc71 # Green for finished
-        embed.title = f"{E_SUCCESS} Gamble Finished!"
-        embed.description = winner_text
-        
-        # Keep the final roster in the embed
-        embed.clear_fields()
-        final_roster = "\n".join([f"{E_ACTIVE} {p.mention}" for p in self.players])
-        if self.bots > 0:
-            final_roster += f"\n{E_ACTIVE} *{self.bots}x Bots*"
-        embed.add_field(name="Final Roster", value=final_roster, inline=False)
+        elif self.game == "death_roll":
+            view = DeathRollGameView(self.host, formatted_players, self.amount, self.currency, pot_size)
+            await view.init_game(interaction)
 
-        await interaction.message.edit(embed=embed, view=self)
+        elif self.game == "slots":
+            await run_slots_game(interaction, self.host, formatted_players, self.amount, self.currency, pot_size)
 
-    # Helper to update the embed during the Lobby phase
+        elif self.game == "roulette":
+            view = RouletteBetView(self.host, formatted_players, self.amount, self.currency, pot_size)
+            await view.update_lobby(interaction)
+
     async def update_lobby_embed(self, interaction):
-        players_list = "\n".join([f"{E_ACTIVE} {p.mention}" for p in self.players])
-        if self.bots > 0:
-            players_list += f"\n{E_ACTIVE} *{self.bots}x Bots*"
-            
+        c_emoji = self.curr_emojis[self.currency]
+        g_name = self.game_names[self.game]
+        g_emoji = self.game_emojis[self.game]
+        
         embed = interaction.message.embeds[0]
+        embed.title = f"{g_emoji} Multiplayer Gamble: {g_name}"
+        embed.description = f"**Bet Amount:** {c_emoji} {self.amount:,}\n**Currency:** {self.currency.replace('_', ' ').title()}\nClick **Join** to enter!"
+        
+        players_list = "\n".join([f"{E_ACTIVE} {p.mention}" for p in self.players])
+        if self.bots > 0: players_list += f"\n{E_ACTIVE} *{self.bots}x Bots*"
         embed.set_field_at(0, name="Current Players", value=players_list, inline=False)
+        
         await interaction.response.edit_message(embed=embed, view=self)
 
-# ---------- COMMAND REGISTRATION ----------
-
+# --- COMMANDS ---
 async def send_gamble_panel(ctx_or_interaction, user, amount: int):
     embed = discord.Embed(
-        title=f"{E_DICE} Multiplayer Gamble Lobby",
-        description=f"**Bet Amount:** {E_MONEY} {amount:,}\nClick **Join Gamble** to enter!",
-        color=0x2b2d31 # Premium dark look
+        title=f"{E_ROLL} Multiplayer Gamble: Dice Roll",
+        description=f"**Bet Amount:** {E_MONEY} {amount:,}\n**Currency:** Cash\nClick **Join** to enter!",
+        color=0x2b2d31
     )
     embed.add_field(name="Current Players", value=f"{E_ACTIVE} {user.mention}", inline=False)
     
@@ -1920,7 +1964,7 @@ async def gamble_prefix(ctx, amount: HumanInt):
     w = get_wallet(ctx.author.id)
     host_balance = int(w.get("balance", 0)) if w else 0
     if host_balance < amount:
-        return await ctx.send(f"{E_ERROR} You don't have enough! You only have **${host_balance:,}**.")
+        return await ctx.send(f"{E_ERROR} You don't have enough Cash to start this!")
     await send_gamble_panel(ctx, ctx.author, amount)
 
 @bot.tree.command(name="gamble", description="Start a multiplayer gamble panel")
@@ -1928,7 +1972,7 @@ async def gamble_slash(interaction: discord.Interaction, amount: int):
     w = get_wallet(interaction.user.id)
     host_balance = int(w.get("balance", 0)) if w else 0
     if host_balance < amount:
-        return await interaction.response.send_message(f"{E_ERROR} You don't have enough! You only have **${host_balance:,}**.", ephemeral=True)
+        return await interaction.response.send_message(f"{E_ERROR} You don't have enough Cash to start this!", ephemeral=True)
     await send_gamble_panel(interaction, interaction.user, amount)
 
 # ==========================================================
