@@ -43,8 +43,6 @@ LOG_CHANNELS = {
     "chat_channel": 975275349573271552, # Daily Task Channel
 }
 
-LOG_CHANNEL_ID = 1485247028023001180 # Your hidden logging channel gamble
-
 # Constants
 TIME_LIMIT = 90 
 MIN_INCREMENT_PERCENT = 5
@@ -149,6 +147,7 @@ E_ROLL = "<a:highroll:1333787513890017281>"
 E_SLOTS = "<a:777casino:761608156119826492>"
 E_ROULETTE = "<a:roullet:678484862956470292>"
 
+
 BATTLE_BANTER = [
     "<a:redfire1:1443251827490684938> Absolute demolition! **{winner}** tore **{loser}** apart. {l_emoji}",
     "<a:miapikachu:1443253477533814865> **{winner}** owned the pitch today! {l_emoji} <:e:1443996214805790871>",
@@ -228,6 +227,7 @@ if db is not None:
 
 PREDICTION_PING_ROLE = "<@&1458516530739286111>"
 PREDICTION_LOG_CHANNEL_ID = 1445461752094396446
+LOG_CHANNEL_ID = 1485247028023001180 # Your hidden logging channel gamble
 
 # Indian Standard Time (IST) setup
 IST = timezone(timedelta(hours=5, minutes=30))
