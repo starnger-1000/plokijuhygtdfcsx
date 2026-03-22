@@ -1349,12 +1349,19 @@ class HighLowGameView(discord.ui.View):
 
     @discord.ui.button(label="Play for HIGH", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ROLL))
     async def btn_high(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        if interaction.user.id != self.host.id: 
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        
+        # This stops "Interaction Failed" by telling Discord to wait
+        await interaction.response.defer() 
         await self.start_rolling(interaction, True)
 
     @discord.ui.button(label="Play for LOW", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ROLL))
     async def btn_low(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        if interaction.user.id != self.host.id: 
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        
+        await interaction.response.defer()
         await self.start_rolling(interaction, False)
 
     async def start_rolling(self, interaction: discord.Interaction, target_high: bool):
@@ -1535,6 +1542,7 @@ class DeathRollGameView(discord.ui.View):
 
 # --- SLOT MACHINE ENGINE ---
 async def run_slots_game(interaction, host, players, wager, currency, pot):
+    await interaction.response.defer()
     match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
     for p in players:
         if not p['is_bot']: users_col.update_one({"user_id": p['id']}, {"$inc": {currency: -wager}})
@@ -1658,16 +1666,19 @@ class RouletteBetView(discord.ui.View):
 
     @discord.ui.button(label="Bet BLACK", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
     async def btn_black(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer() # <--- ADD THIS
         self.bets[interaction.user.id] = "BLACK"
         await self.update_lobby(interaction)
 
     @discord.ui.button(label="Bet RED", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR))
     async def btn_red(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer() # <--- ADD THIS
         self.bets[interaction.user.id] = "RED"
         await self.update_lobby(interaction)
 
     @discord.ui.button(label="Bet GREEN", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ITEMBOX))
     async def btn_green(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer() # <--- ADD THIS
         self.bets[interaction.user.id] = "GREEN"
         await self.update_lobby(interaction)
 
@@ -1779,31 +1790,36 @@ class GambleSetupView(discord.ui.View):
         if interaction.user.id != self.host.id: 
             return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
         
+        # 1. TELL DISCORD TO WAIT (STOPS INTERACTION FAILED)
+        await interaction.response.defer()
+        
         self.game = self.game_select.values[0]
         self.clear_items()
         
-        # Currency Selection
+        # 2. Setup Currency Dropdown
         curr_select = discord.ui.Select(placeholder="Select Currency...", options=[
             discord.SelectOption(label="Cash ($)", value="cash", emoji=discord.PartialEmoji.from_str(E_MONEY)),
             discord.SelectOption(label="Pokecoins (PC)", value="pc", emoji=discord.PartialEmoji.from_str(E_ITEMBOX)),
             discord.SelectOption(label="Shiny Coins (SC)", value="sc", emoji=discord.PartialEmoji.from_str(E_CROWN))
         ])
         
-        # Fixed: Defined the callback properly
         async def curr_cb(i: discord.Interaction):
             if i.user.id != self.host.id: return
+            # Defer here too to prevent lag on the second step
+            await i.response.defer()
             self.currency = curr_select.values[0]
             await self.render_lobby(i)
             
         curr_select.callback = curr_cb
         self.add_item(curr_select)
         
+        # 3. Use interaction.message.edit because we already "deferred" (responded)
         embed = discord.Embed(
             title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", 
             description=f"{E_ARROW} Game selected: **{self.game.replace('_', ' ').title()}**\nWhat are we wagering today?", 
             color=0xe67e22
         )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
 
     async def render_lobby(self, interaction: discord.Interaction):
         self.clear_items()
