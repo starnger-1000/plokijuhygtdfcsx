@@ -1819,10 +1819,12 @@ class GambleSetupView(discord.ui.View):
 
     async def set_wager_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.host.id: return
-        # This replaces the hardcoded 10,000 with the pop-up window
-        await interaction.response.send_modal(WagerModal(self))
+        
+        # This opens the pop-up window for ANY wager amount
+        modal = WagerModal(self)
+        await interaction.response.send_modal(modal)
 
-   async def audit_and_confirm(self, interaction: discord.Interaction):
+    async def audit_and_confirm(self, interaction: discord.Interaction):
         broke_players = []
         for p in self.players:
             if not p['is_bot']:
@@ -1834,7 +1836,6 @@ class GambleSetupView(discord.ui.View):
         if broke_players:
             b_names = ", ".join([p['name'] for p in broke_players])
             embed = discord.Embed(title=f"{E_ERROR} AUDIT FAILED", description=f"{E_ARROW} {b_names} cannot afford the **{self.wager:,} {self.currency.upper()}** wager.\n\nKick them and play?", color=0xff0000)
-            
             btn_kick = discord.ui.Button(label="Kick & Play", style=discord.ButtonStyle.success)
             async def kick_cb(i):
                 self.players = [p for p in self.players if p not in broke_players]
@@ -1845,7 +1846,6 @@ class GambleSetupView(discord.ui.View):
 
         pot = self.wager * len(self.players)
         embed = discord.Embed(title=f"{E_ACTIVE} FINAL CONFIRMATION", description=f"**Game:** {self.game.replace('_', ' ').title()}\n**Wager:** {self.wager:,} {self.currency.upper()} each\n**Total Pot:** {pot:,} {self.currency.upper()}", color=0x2ecc71)
-        
         btn_start = discord.ui.Button(label="Confirm & Start", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
         async def start_cb(i):
             if self.game == "high_low":
@@ -1858,7 +1858,6 @@ class GambleSetupView(discord.ui.View):
             elif self.game == "roulette":
                 game_view = RouletteBetView(self.host, self.players, self.wager, self.currency, pot)
                 await game_view.update_lobby(i)
-                
         btn_start.callback = start_cb
         self.add_item(btn_start)
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1870,7 +1869,7 @@ async def gamble_prefix(ctx):
     await ctx.send(embed=embed, view=GambleSetupView(ctx.author))
 
 # ==========================================================
-# PREMIUM PREDICTION SYSTEM
+# PREMIUM PREDICTION SYSTEM 
 # ==========================================================
 
 # --- ADMIN EVENT CREATION VIEWS & MODALS ---
