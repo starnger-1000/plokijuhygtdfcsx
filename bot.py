@@ -1181,119 +1181,6 @@ async def pc_claim_alert_task():
                 db.pc_claims.update_one({"_id": claim["_id"]}, {"$set": {"alert_sent": True}})
                 
         await asyncio.sleep(60) # Check every 60 seconds
-
-# ==========================================================
-# 🎰 THE HIGH ROLLER LOUNGE: CASINO COMMANDS
-# ==========================================================
-
-# --- HELPER: GET OR CREATE GAMBLE PROFILE ---
-def get_gamble_profile(user_id):
-    uid = str(user_id)
-    profile = gamble_profiles_col.find_one({"user_id": uid})
-    if not profile:
-        profile = {
-            "user_id": uid, "net_profit": 0, "total_wagered": 0,
-            "games_played": 0, "biggest_win": 0, "biggest_loss": 0,
-            "game_stats": {
-                "high_low": {"wins": 0, "played": 0}, "death_roll": {"wins": 0, "played": 0},
-                "slots": {"wins": 0, "played": 0}, "roulette": {"wins": 0, "played": 0}
-            }
-        }
-        gamble_profiles_col.insert_one(profile)
-    return profile
-
-# --- VIP PROFILE COMMAND ---
-@bot.command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
-async def gamblingprofile(ctx, member: discord.Member = None):
-    target = member or ctx.author
-    try:
-        prof = get_gamble_profile(target.id)
-        best_game, best_rate = "None", -1
-        
-        for game, stats in prof.get("game_stats", {}).items():
-            played = stats.get("played", 0)
-            if played > 0:
-                rate = stats.get("wins", 0) / played
-                if rate > best_rate:
-                    best_rate, best_game = rate, game.replace("_", " ").title()
-                    
-        color = 0x2ecc71 if prof.get("net_profit", 0) >= 0 else 0xe74c3c
-        sign = "+" if prof.get("net_profit", 0) >= 0 else ""
-        
-        desc = (f"**{E_ITEMBOX} LIFETIME FINANCES**\n"
-                f"{E_MONEY} **Net Profit/Loss:** {sign}{prof.get('net_profit', 0):,}\n"
-                f"{E_ACTIVE} **Total Wagered:** {prof.get('total_wagered', 0):,}\n\n"
-                f"**{E_SLOTS} GAMBLING METRICS**\n"
-                f"{E_ARROW} **Best Game:** {best_game}\n"
-                f"{E_ARROW} **Games Played:** {prof.get('games_played', 0):,}\n")
-        
-        await ctx.send(embed=discord.Embed(title=f"{E_CROWN} CASINO VIP: {target.display_name}", description=desc, color=color))
-    except Exception as e:
-        await ctx.send(f"{E_ERROR} Error loading profile: `{e}`")
-
-# --- LEADERBOARD LOGIC ---
-class GambleLBSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Highest Net Profit", value="profit", emoji=discord.PartialEmoji.from_str(E_MONEY)),
-            discord.SelectOption(label="Top Slot Players", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
-            discord.SelectOption(label="Top Roulette Players", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
-        ]
-        super().__init__(placeholder="Sort Leaderboard...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        sort_key = "net_profit" if self.values[0] == "profit" else f"game_stats.{self.values[0]}.wins"
-        top_players = list(gamble_profiles_col.find().sort(sort_key, -1).limit(10))
-        
-        desc = f"{E_ARROW} Category: **{self.values[0].replace('_', ' ').title()}**\n\n"
-        for i, p in enumerate(top_players, 1):
-            val = p.get('net_profit', 0) if self.values[0] == "profit" else p.get('game_stats', {}).get(self.values[0], {}).get('wins', 0)
-            sign = "+" if (self.values[0] == "profit" and val >= 0) else ""
-            user = bot.get_user(int(p["user_id"]))
-            name = user.display_name if user else f"User({p['user_id']})"
-            desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{val:,})\n"
-            
-        await interaction.response.edit_message(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f))
-
-class GambleLBView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(GambleLBSelect())
-
-@bot.command(name="gamblingleaderboard", aliases=["glb"])
-async def gamblingleaderboard(ctx):
-    top_players = list(gamble_profiles_col.find().sort("net_profit", -1).limit(10))
-    desc = f"{E_ARROW} Category: **Highest Net Profit**\n\n"
-    for i, p in enumerate(top_players, 1):
-        sign = "+" if p.get("net_profit", 0) >= 0 else ""
-        user = bot.get_user(int(p["user_id"]))
-        name = user.display_name if user else f"User({p['user_id']})"
-        desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{p.get('net_profit', 0):,})\n"
-    await ctx.send(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f), view=GambleLBView())
-
-# --- HISTORY & RECEIPTS ---
-@bot.command(name="listgambles", aliases=["lgs"])
-async def listgambles(ctx):
-    uid = str(ctx.author.id)
-    history = list(gamble_history_col.find({"players": uid}).sort("timestamp", -1).limit(10))
-    if not history: return await ctx.send(f"{E_ALERT} No games found.")
-    
-    desc = ""
-    for h in history:
-        res = next((r for r in h.get("results", []) if str(r.get("id")) == uid), None)
-        amt = res["amount"] if res else 0
-        sign = "+" if amt > 0 else ""
-        desc += f"{E_ARROW} `#{h.get('match_id', '0000')}` | {h.get('game','game').title()} | **{sign}{amt:,}**\n"
-    await ctx.send(embed=discord.Embed(title="RECENT GAMES", description=desc, color=0x3498db))
-
-@bot.command(name="infogamble", aliases=["gbinfo"])
-async def infogamble(ctx, match_id: str):
-    match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
-    if not match: return await ctx.send(f"{E_ERROR} Match ID `#{match_id}` not found.")
-    desc = f"**Game:** {match['game'].title()}\n**Pot:** {match['total_pot']:,}\n\n**Results:**\n"
-    for p in match.get("results", []):
-        desc += f"{E_ARROW} {p['name']}: {'Won' if p['amount']>0 else 'Lost'} {abs(p['amount']):,}\n"
-    await ctx.send(embed=discord.Embed(title=f"RECEIPT: #{match['match_id']}", description=desc, color=0x3498db))
     
 # ==========================================================
 # 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
@@ -1344,7 +1231,7 @@ class HighLowGameView(discord.ui.View):
         target_str = "HIGH" if target_high else "LOW"
         desc_rolls = ""
         
-        embed = discord.Embed(title=f"{E_DICE} HIGH OR LOW: ROLLING PHASE", color=0xe67e22)
+        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> HIGH OR LOW: ROLLING PHASE", color=0xe67e22)
         embed.set_image(url=GIF_DICE)
         
         # Using interaction.message.edit instead of response.edit_message because we deferred
@@ -1352,7 +1239,7 @@ class HighLowGameView(discord.ui.View):
         
         for res in results:
             # Suspense State
-            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}{E_ROLL} **{res['player']['name']}** is rolling the dice..."
+            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}<a:rollingdice:1345091274226663494> **{res['player']['name']}** is rolling the dice..."
             await interaction.message.edit(embed=embed)
             await asyncio.sleep(2) # 2 Second Suspense
             
@@ -1429,7 +1316,7 @@ class DeathRollGameView(discord.ui.View):
 
     async def render_state(self, interaction):
         current_p = self.players[self.turn_idx]
-        embed = discord.Embed(title=f"{E_ROLL} THE DEATH ROLL", description=f"{E_ARROW} The Pot: **{self.pot:,} {self.currency.upper()}**\n{E_ARROW} The Target: Roll out of **{self.current_max:,}**\n\n{E_ROLL} **{current_p['name']}**, it is your turn.", color=0xe74c3c)
+        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> THE DEATH ROLL", description=f"{E_ARROW} The Pot: **{self.pot:,} {self.currency.upper()}**\n{E_ARROW} The Target: Roll out of **{self.current_max:,}**\n\n<a:rollingdice:1345091274226663494> **{current_p['name']}**, it is your turn.", color=0xe74c3c)
         embed.set_image(url=GIF_DEATHROLL)
         
         if self.current_max <= 5: embed.description = f"{E_ACTIVE} **DANGER ZONE** {E_ACTIVE}\n{embed.description}"
@@ -1462,7 +1349,7 @@ class DeathRollGameView(discord.ui.View):
         else:
             roll = random.randint(1, self.current_max)
 
-        embed = discord.Embed(title=f"{E_ROLL} THE DEATH ROLL", description=f"{E_SUCCESS} **{player['name']}** rolled a **{roll:,}**!", color=0xe67e22)
+        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> THE DEATH ROLL", description=f"{E_SUCCESS} **{player['name']}** rolled a **{roll:,}**!", color=0xe67e22)
         embed.set_image(url=GIF_DEATHROLL)
         if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=None)
         else: await interaction.response.edit_message(embed=embed, view=None)
@@ -1538,7 +1425,7 @@ async def run_slots_game(interaction, host, players, wager, currency, pot):
         score = 3 if result == [7,7,7] else 2 if len(set(result)) == 1 else 1 if len(set(result)) == 2 else 0
         player_results.append({"player": p, "reels": result, "score": score})
 
-    embed = discord.Embed(title=f"{E_SLOTS} SLOT PARLOR: LIVE SPINS", color=0xf1c40f)
+    embed = discord.Embed(title="<a:777casino:761608156119826492> SLOT PARLOR: LIVE SPINS", color=0xf1c40f)
     embed.set_image(url=GIF_SLOTS)
     
     # Using interaction.message.edit because we deferred
@@ -1549,19 +1436,19 @@ async def run_slots_game(interaction, host, players, wager, currency, pot):
         reels = res['reels']
         name = res['player']['name']
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n{E_SLOTS} **{E_SLOTS} | {E_SLOTS} | {E_SLOTS}**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **<a:777casino:761608156119826492> | <a:777casino:761608156119826492> | <a:777casino:761608156119826492>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n{E_SLOTS} **[ {reels[0]} ] | {E_SLOTS} | {E_SLOTS}**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | <a:777casino:761608156119826492> | <a:777casino:761608156119826492>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n{E_SLOTS} **[ {reels[0]} ] | [ {reels[1]} ] | {E_SLOTS}**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | [ {reels[1]} ] | <a:777casino:761608156119826492>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_SUCCESS} **{name}** finished spinning:\n\n{E_SLOTS} **[ {reels[0]} ] | [ {reels[1]} ] | [ {reels[2]} ]**"
+        embed.description = f"{E_SUCCESS} **{name}** finished spinning:\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | [ {reels[1]} ] | [ {reels[2]} ]**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
 
@@ -1627,7 +1514,7 @@ class RouletteBetView(discord.ui.View):
         for p in self.players:
             if p['is_bot']: desc += f"{E_ITEMBOX} **{p['name']}** *(Waiting for humans...)*\n"
 
-        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
+        embed = discord.Embed(title="<a:roullet:678484862956470292> ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
         embed.set_image(url=GIF_ROULETTE)
         
         if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
@@ -1676,7 +1563,7 @@ class RouletteBetView(discord.ui.View):
         if random.random() < 0.05: winning_color = "GREEN"
         else: winning_color = bot_color if random.random() < 0.80 else ("RED" if bot_color == "BLACK" else "BLACK")
         
-        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
+        embed = discord.Embed(title="<a:roullet:678484862956470292> ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
         embed.set_image(url=GIF_ROULETTE)
         await interaction.message.edit(embed=embed, view=None)
         await asyncio.sleep(2)
@@ -1911,7 +1798,120 @@ async def gamble_slash(interaction: discord.Interaction, amount: int):
     await send_gamble_panel(interaction, interaction.user, amount)
 
 # ==========================================================
-# PREMIUM PREDICTION SYSTEM 
+# 🎰 THE HIGH ROLLER LOUNGE: CASINO COMMANDS
+# ==========================================================
+
+# --- HELPER: GET OR CREATE GAMBLE PROFILE ---
+def get_gamble_profile(user_id):
+    uid = str(user_id)
+    profile = gamble_profiles_col.find_one({"user_id": uid})
+    if not profile:
+        profile = {
+            "user_id": uid, "net_profit": 0, "total_wagered": 0,
+            "games_played": 0, "biggest_win": 0, "biggest_loss": 0,
+            "game_stats": {
+                "high_low": {"wins": 0, "played": 0}, "death_roll": {"wins": 0, "played": 0},
+                "slots": {"wins": 0, "played": 0}, "roulette": {"wins": 0, "played": 0}
+            }
+        }
+        gamble_profiles_col.insert_one(profile)
+    return profile
+
+# --- VIP PROFILE COMMAND ---   
+@bot.command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
+async def gamblingprofile(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    try:
+        prof = get_gamble_profile(target.id)
+        best_game, best_rate = "None", -1
+        
+        for game, stats in prof.get("game_stats", {}).items():
+            played = stats.get("played", 0)
+            if played > 0:
+                rate = stats.get("wins", 0) / played
+                if rate > best_rate:
+                    best_rate, best_game = rate, game.replace("_", " ").title()
+                    
+        color = 0x2ecc71 if prof.get("net_profit", 0) >= 0 else 0xe74c3c
+        sign = "+" if prof.get("net_profit", 0) >= 0 else ""
+        
+        desc = (f"**{E_ITEMBOX} LIFETIME FINANCES**\n"
+                f"{E_MONEY} **Net Profit/Loss:** {sign}{prof.get('net_profit', 0):,}\n"
+                f"{E_ACTIVE} **Total Wagered:** {prof.get('total_wagered', 0):,}\n\n"
+                f"**{E_SLOTS} GAMBLING METRICS**\n"
+                f"{E_ARROW} **Best Game:** {best_game}\n"
+                f"{E_ARROW} **Games Played:** {prof.get('games_played', 0):,}\n")
+        
+        await ctx.send(embed=discord.Embed(title=f"{E_CROWN} CASINO VIP: {target.display_name}", description=desc, color=color))
+    except Exception as e:
+        await ctx.send(f"{E_ERROR} Error loading profile: `{e}`")
+
+# --- LEADERBOARD LOGIC ---
+class GambleLBSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Highest Net Profit", value="profit", emoji=discord.PartialEmoji.from_str(E_MONEY)),
+            discord.SelectOption(label="Top Slot Players", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
+            discord.SelectOption(label="Top Roulette Players", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
+        ]
+        super().__init__(placeholder="Sort Leaderboard...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        sort_key = "net_profit" if self.values[0] == "profit" else f"game_stats.{self.values[0]}.wins"
+        top_players = list(gamble_profiles_col.find().sort(sort_key, -1).limit(10))
+        
+        desc = f"{E_ARROW} Category: **{self.values[0].replace('_', ' ').title()}**\n\n"
+        for i, p in enumerate(top_players, 1):
+            val = p.get('net_profit', 0) if self.values[0] == "profit" else p.get('game_stats', {}).get(self.values[0], {}).get('wins', 0)
+            sign = "+" if (self.values[0] == "profit" and val >= 0) else ""
+            user = bot.get_user(int(p["user_id"]))
+            name = user.display_name if user else f"User({p['user_id']})"
+            desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{val:,})\n"
+            
+        await interaction.response.edit_message(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f))
+
+class GambleLBView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GambleLBSelect())
+
+@bot.command(name="gamblingleaderboard", aliases=["glb"])
+async def gamblingleaderboard(ctx):
+    top_players = list(gamble_profiles_col.find().sort("net_profit", -1).limit(10))
+    desc = f"{E_ARROW} Category: **Highest Net Profit**\n\n"
+    for i, p in enumerate(top_players, 1):
+        sign = "+" if p.get("net_profit", 0) >= 0 else ""
+        user = bot.get_user(int(p["user_id"]))
+        name = user.display_name if user else f"User({p['user_id']})"
+        desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{p.get('net_profit', 0):,})\n"
+    await ctx.send(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f), view=GambleLBView())
+
+# --- HISTORY & RECEIPTS --- 
+@bot.command(name="listgambles", aliases=["lgs"])
+async def listgambles(ctx):
+    uid = str(ctx.author.id)
+    history = list(gamble_history_col.find({"players": uid}).sort("timestamp", -1).limit(10))
+    if not history: return await ctx.send(f"{E_ALERT} No games found.")
+    
+    desc = ""
+    for h in history:
+        res = next((r for r in h.get("results", []) if str(r.get("id")) == uid), None)
+        amt = res["amount"] if res else 0
+        sign = "+" if amt > 0 else ""
+        desc += f"{E_ARROW} `#{h.get('match_id', '0000')}` | {h.get('game','game').title()} | **{sign}{amt:,}**\n"
+    await ctx.send(embed=discord.Embed(title="RECENT GAMES", description=desc, color=0x3498db))
+
+@bot.command(name="infogamble", aliases=["gbinfo"])
+async def infogamble(ctx, match_id: str):
+    match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
+    if not match: return await ctx.send(f"{E_ERROR} Match ID `#{match_id}` not found.")
+    desc = f"**Game:** {match['game'].title()}\n**Pot:** {match['total_pot']:,}\n\n**Results:**\n"
+    for p in match.get("results", []):
+        desc += f"{E_ARROW} {p['name']}: {'Won' if p['amount']>0 else 'Lost'} {abs(p['amount']):,}\n"
+    await ctx.send(embed=discord.Embed(title=f"RECEIPT: #{match['match_id']}", description=desc, color=0x3498db))
+
+# ==========================================================
+# PREMIUM PREDICTION SYSTEM   
 # ==========================================================
 
 # --- ADMIN EVENT CREATION VIEWS & MODALS ---
