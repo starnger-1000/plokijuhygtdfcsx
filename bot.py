@@ -1316,7 +1316,7 @@ async def loggamble_prefix(ctx, match_id: str):
     await log_casino_receipt(bot, match_id.upper().replace("#", ""))
     await ctx.send(embed=discord.Embed(description=f"{E_SUCCESS} Match manually pushed to logging channel.", color=0x2ecc71))
 
-@bot.command(name="listgambles", aliases=["lg"], description="View your recent gambling history.")
+@bot.command(name="listgambles", aliases=["lgs"], description="View your recent gambling history.")
 async def listgambles_prefix(ctx):
     history = list(gamble_history_col.find({"players": ctx.author.id}).sort("timestamp", -1).limit(10))
     if not history: return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You haven't played any games yet.", color=0xe67e22))
