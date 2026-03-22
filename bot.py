@@ -1226,7 +1226,7 @@ async def log_casino_receipt(bot, match_id):
     await channel.send(embed=embed)
 
 # --- USER: VIP GAMBLING PROFILE ---
-@bot.command(name="gamblingprofile", aliases=["gp"], description="View your Casino VIP Card.")
+@bot.command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
 async def gamblingprofile_prefix(ctx, member: discord.Member = None):
     target = member or ctx.author
     prof = get_gamble_profile(target.id)
@@ -1299,7 +1299,7 @@ async def gamblingleaderboard_prefix(ctx):
     await ctx.send(embed=embed, view=GambleLBView())
 
 # --- USER & ADMIN: RECEIPT & HISTORY COMMANDS ---
-@bot.command(name="infogamble", aliases=["ig"], description="Look up a specific Casino Receipt.")
+@bot.command(name="infogamble", aliases=["gbinfo"], description="Look up a specific Casino Receipt.")
 async def infogamble_prefix(ctx, match_id: str):
     match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
     if not match: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} Could not find Match ID `{match_id}`.", color=0xff0000))
@@ -1734,6 +1734,27 @@ class RouletteBetView(discord.ui.View):
         gamble_history_col.insert_one({"match_id": self.match_id, "game": "roulette", "currency": self.currency, "total_pot": self.pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in self.players if not p['is_bot']], "results": db_results})
         await log_casino_receipt(bot, self.match_id)
 
+class WagerModal(discord.ui.Modal, title="Casino Buy-In"):
+    wager_input = discord.ui.TextInput(
+        label="Enter Wager Amount",
+        placeholder="e.g. 50000",
+        min_length=1,
+        max_length=10
+    )
+
+    def __init__(self, parent_view):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(self.wager_input.value)
+            if amount <= 0: raise ValueError
+            self.parent_view.wager = amount
+            await self.parent_view.audit_and_confirm(interaction)
+        except ValueError:
+            await interaction.response.send_message(f"{E_ERROR} Please enter a valid positive number!", ephemeral=True)
+
 # --- MASTER TRANSFORMING LOBBY ---
 class GambleSetupView(discord.ui.View):
     def __init__(self, host):
@@ -1798,10 +1819,10 @@ class GambleSetupView(discord.ui.View):
 
     async def set_wager_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.host.id: return
-        self.wager = 10000 
-        await self.audit_and_confirm(interaction)
+        # This replaces the hardcoded 10,000 with the pop-up window
+        await interaction.response.send_modal(WagerModal(self))
 
-    async def audit_and_confirm(self, interaction: discord.Interaction):
+   async def audit_and_confirm(self, interaction: discord.Interaction):
         broke_players = []
         for p in self.players:
             if not p['is_bot']:
@@ -1837,21 +1858,16 @@ class GambleSetupView(discord.ui.View):
             elif self.game == "roulette":
                 game_view = RouletteBetView(self.host, self.players, self.wager, self.currency, pot)
                 await game_view.update_lobby(i)
-        
+                
         btn_start.callback = start_cb
         self.add_item(btn_start)
         await interaction.response.edit_message(embed=embed, view=self)
-
+       
 # --- COMMAND ENTRY POINTS ---
-@bot.command(name="gamble", aliases=["gb"], description="Open the High Roller Lounge.")
+@bot.command(name="gamble", aliases=["casino"], description="Open the High Roller Lounge.")
 async def gamble_prefix(ctx):
     embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Welcome to the Casino. Select your game to open a lobby.", color=0xe67e22)
     await ctx.send(embed=embed, view=GambleSetupView(ctx.author))
-
-@bot.tree.command(name="gamble", description="Open the High Roller Lounge.")
-async def gamble_slash(interaction: discord.Interaction):
-    embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Welcome to the Casino. Select your game to open a lobby.", color=0xe67e22)
-    await interaction.response.send_message(embed=embed, view=GambleSetupView(interaction.user))
 
 # ==========================================================
 # PREMIUM PREDICTION SYSTEM
