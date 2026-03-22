@@ -41,8 +41,9 @@ LOG_CHANNELS = {
     "shop_main": 1446018190093058222, # Shop interface
     "login_log": 1455496870003740736,  # Fixed: Changed from Variable = Value to "key": Value
     "chat_channel": 975275349573271552, # Daily Task Channel
-    LOG_CHANNEL_ID = 1485247028023001180 # Your hidden logging channel gamble
 }
+
+LOG_CHANNEL_ID = 1485247028023001180 # Your hidden logging channel gamble
 
 # Constants
 TIME_LIMIT = 90 
