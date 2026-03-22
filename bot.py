@@ -1183,177 +1183,117 @@ async def pc_claim_alert_task():
         await asyncio.sleep(60) # Check every 60 seconds
 
 # ==========================================================
-# 🎰 THE HIGH ROLLER LOUNGE: CASINO ENGINE (PHASE 1)
+# 🎰 THE HIGH ROLLER LOUNGE: CASINO COMMANDS
 # ==========================================================
 
-# --- FIXED HELPER: GET OR CREATE GAMBLE PROFILE ---
+# --- HELPER: GET OR CREATE GAMBLE PROFILE ---
 def get_gamble_profile(user_id):
-    uid = str(user_id) # Force string to match your wallets_col logic
+    uid = str(user_id)
     profile = gamble_profiles_col.find_one({"user_id": uid})
-    
     if not profile:
         profile = {
-            "user_id": uid, 
-            "net_profit": 0, 
-            "total_wagered": 0,
-            "games_played": 0, 
-            "biggest_win": 0, 
-            "biggest_loss": 0,
+            "user_id": uid, "net_profit": 0, "total_wagered": 0,
+            "games_played": 0, "biggest_win": 0, "biggest_loss": 0,
             "game_stats": {
-                "high_low": {"wins": 0, "played": 0}, 
-                "death_roll": {"wins": 0, "played": 0},
-                "slots": {"wins": 0, "played": 0}, 
-                "roulette": {"wins": 0, "played": 0}
+                "high_low": {"wins": 0, "played": 0}, "death_roll": {"wins": 0, "played": 0},
+                "slots": {"wins": 0, "played": 0}, "roulette": {"wins": 0, "played": 0}
             }
         }
         gamble_profiles_col.insert_one(profile)
     return profile
 
-async def update_casino_balance(user_id, amount: int, currency: str):
-    """
-    Safely adds or deducts money from the personal_wallets database 
-    using the exact document _id to prevent ghost wallets.
-    """
-    # 1. Use your existing smart fetcher to find the exact wallet (handles str/int ID issues)
-    w = get_wallet(user_id)
-    
-    if not w:
-        return # Safety catch
-        
-    # 2. Use the exact, unique MongoDB "_id" to update the balance, pc, or shiny_coins
-    wallets_col.update_one(
-        {"_id": w["_id"]}, 
-        {"$inc": {currency: amount}}
-    )
-
-# --- CASINO AUTO-LOGGER ---
-async def log_casino_receipt(bot, match_id):
-    match = gamble_history_col.find_one({"match_id": match_id})
-    if not match: return
-    
-    channel = bot.get_channel(LOG_CHANNEL_ID)
-    if not channel: return
-    
-    game_emojis = {"high_low": E_DICE, "death_roll": E_ROLL, "slots": E_SLOTS, "roulette": E_ROULETTE}
-    icon = game_emojis.get(match["game"], E_STAR)
-    
-    desc = f"{icon} **Game:** {match['game'].replace('_', ' ').title()}\n"
-    desc += f"{E_MONEY} **Currency:** {match['currency'].upper()}\n"
-    desc += f"{E_ITEMBOX} **Total Pot:** {match['total_pot']:,}\n"
-    desc += f"{E_ACTIVE} **Date:** <t:{match['timestamp']}:F>\n\n**Results:**\n"
-    
-    for player in match.get("results", []):
-        name = player["name"]
-        amt = player["amount"]
-        if amt > 0: desc += f"{E_ARROW} **{name}:** Won {amt:,} {match['currency'].upper()}\n"
-        else: desc += f"{E_ARROW} **{name}:** Lost {abs(amt):,} {match['currency'].upper()}\n"
-        
-    embed = discord.Embed(title=f"{E_BOOK} CASINO RECEIPT: #{match_id}", description=desc, color=0xf1c40f)
-    await channel.send(embed=embed)
-
-# --- FIXED COMMAND: VIP PROFILE ---
-@bot.command(name="gamblingprofile", aliases=["gblp"])
-async def gamblingprofile_prefix(ctx, member: discord.Member = None):
+# --- VIP PROFILE COMMAND ---
+@bot.hybrid_command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
+async def gamblingprofile(ctx, member: discord.Member = None):
+    target = member or ctx.author
     try:
-        target = member or ctx.author
-        # We wrap this in a try/except so if it fails, the bot tells us why
         prof = get_gamble_profile(target.id)
+        best_game, best_rate = "None", -1
         
-        best_game = "None"
-        best_rate = -1
-        
-        # Safety check: Ensure game_stats exists to prevent KeyErrors
-        stats_dict = prof.get("game_stats", {})
-        
-        for game, stats in stats_dict.items():
+        for game, stats in prof.get("game_stats", {}).items():
             played = stats.get("played", 0)
             if played > 0:
                 rate = stats.get("wins", 0) / played
                 if rate > best_rate:
-                    best_rate = rate
-                    best_game = game.replace("_", " ").title()
+                    best_rate, best_game = rate, game.replace("_", " ").title()
                     
         color = 0x2ecc71 if prof.get("net_profit", 0) >= 0 else 0xe74c3c
         sign = "+" if prof.get("net_profit", 0) >= 0 else ""
         
-        desc = f"**{E_ITEMBOX} LIFETIME FINANCES**\n"
-        desc += f"{E_MONEY} **Net Profit/Loss:** {sign}{prof.get('net_profit', 0):,}\n"
-        desc += f"{E_ACTIVE} **Total Wagered:** {prof.get('total_wagered', 0):,}\n\n"
-        desc += f"**{E_SLOTS} GAMBLING METRICS**\n"
-        desc += f"{E_ARROW} **Best Game:** {best_game}\n"
-        desc += f"{E_ARROW} **Games Played:** {prof.get('games_played', 0):,}\n"
-        desc += f"{E_ARROW} **Biggest Win:** +{prof.get('biggest_win', 0):,}\n"
-        desc += f"{E_ARROW} **Biggest Loss:** -{prof.get('biggest_loss', 0):,}\n"
+        desc = (f"**{E_ITEMBOX} LIFETIME FINANCES**\n"
+                f"{E_MONEY} **Net Profit/Loss:** {sign}{prof.get('net_profit', 0):,}\n"
+                f"{E_ACTIVE} **Total Wagered:** {prof.get('total_wagered', 0):,}\n\n"
+                f"**{E_SLOTS} GAMBLING METRICS**\n"
+                f"{E_ARROW} **Best Game:** {best_game}\n"
+                f"{E_ARROW} **Games Played:** {prof.get('games_played', 0):,}\n")
         
-        embed = discord.Embed(title=f"{E_CROWN} CASINO VIP: {target.display_name}", description=desc, color=color)
-        await ctx.send(embed=embed)
-        
+        await ctx.send(embed=discord.Embed(title=f"{E_CROWN} CASINO VIP: {target.display_name}", description=desc, color=color))
     except Exception as e:
-        print(f"CRASH IN GBLP: {e}")
-        await ctx.send(f"{E_ERROR} Profile error: `{e}`")
-                                
+        await ctx.send(f"{E_ERROR} Error loading profile: `{e}`")
+
+# --- LEADERBOARD LOGIC ---
+class GambleLBSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Highest Net Profit", value="profit", emoji=discord.PartialEmoji.from_str(E_MONEY)),
+            discord.SelectOption(label="Top Slot Players", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
+            discord.SelectOption(label="Top Roulette Players", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
+        ]
+        super().__init__(placeholder="Sort Leaderboard...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        sort_key = "net_profit" if self.values[0] == "profit" else f"game_stats.{self.values[0]}.wins"
+        top_players = list(gamble_profiles_col.find().sort(sort_key, -1).limit(10))
+        
+        desc = f"{E_ARROW} Category: **{self.values[0].replace('_', ' ').title()}**\n\n"
+        for i, p in enumerate(top_players, 1):
+            val = p.get('net_profit', 0) if self.values[0] == "profit" else p.get('game_stats', {}).get(self.values[0], {}).get('wins', 0)
+            sign = "+" if (self.values[0] == "profit" and val >= 0) else ""
+            user = bot.get_user(int(p["user_id"]))
+            name = user.display_name if user else f"User({p['user_id']})"
+            desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{val:,})\n"
+            
+        await interaction.response.edit_message(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f))
+
+class GambleLBView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GambleLBSelect())
+
 @bot.hybrid_command(name="gamblingleaderboard", aliases=["glb"])
 async def gamblingleaderboard(ctx):
-    # Pull top 10 from the gamble_profiles_col
     top_players = list(gamble_profiles_col.find().sort("net_profit", -1).limit(10))
-    
     desc = f"{E_ARROW} Category: **Highest Net Profit**\n\n"
-    
     for i, p in enumerate(top_players, 1):
-        # Safety: Use .get() in case a profile is missing a field
-        profit = p.get("net_profit", 0)
-        sign = "+" if profit >= 0 else ""
-        
-        # PINPOINT: Convert string ID from DB back to int for Discord
-        try:
-            user_id = int(p["user_id"])
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-            name = user.display_name if user else f"User {user_id}"
-        except:
-            name = f"Ghost User ({p['user_id']})"
-            
-        desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{profit:,})\n"
-        
-    embed = discord.Embed(title=f"{E_CROWN} HIGH ROLLER HALL OF FAME", description=desc or "No data yet.", color=0xf1c40f)
-    await ctx.send(embed=embed, view=GambleLBView())
+        sign = "+" if p.get("net_profit", 0) >= 0 else ""
+        user = bot.get_user(int(p["user_id"]))
+        name = user.display_name if user else f"User({p['user_id']})"
+        desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{p.get('net_profit', 0):,})\n"
+    await ctx.send(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f), view=GambleLBView())
 
+# --- HISTORY & RECEIPTS ---
 @bot.hybrid_command(name="listgambles", aliases=["lgs"])
 async def listgambles(ctx):
-    # PINPOINT: Search using the string version of your ID
     uid = str(ctx.author.id)
     history = list(gamble_history_col.find({"players": uid}).sort("timestamp", -1).limit(10))
-    
-    if not history: 
-        return await ctx.send(f"{E_ALERT} No recent games found for your ID.")
+    if not history: return await ctx.send(f"{E_ALERT} No games found.")
     
     desc = ""
     for h in history:
-        # Match your ID within the results list as a string
-        user_res = next((r for r in h.get("results", []) if str(r.get("id")) == uid), None)
-        amt = user_res["amount"] if user_res else 0
+        res = next((r for r in h.get("results", []) if str(r.get("id")) == uid), None)
+        amt = res["amount"] if res else 0
         sign = "+" if amt > 0 else ""
-        
-        game_name = h.get("game", "Unknown").replace("_", " ").title()
-        match_id = h.get("match_id", "0000")
-        
-        desc += f"{E_ARROW} `#{match_id}` | {game_name} | **{sign}{amt:,}**\n"
-    
-    embed = discord.Embed(title=f"{E_ITEMBOX} {ctx.author.display_name}'s RECENT GAMES", description=desc, color=0x3498db)
-    await ctx.send(embed=embed)
+        desc += f"{E_ARROW} `#{h.get('match_id', '0000')}` | {h.get('game','game').title()} | **{sign}{amt:,}**\n"
+    await ctx.send(embed=discord.Embed(title="RECENT GAMES", description=desc, color=0x3498db))
 
-# --- 5. RECEIPT LOOKUP (.gbinfo) ---
-@bot.hybrid_command(name="infogamble", aliases=["gbinfo"], description="Check the details of a specific match ID.")
+@bot.hybrid_command(name="infogamble", aliases=["gbinfo"])
 async def infogamble(ctx, match_id: str):
     match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
-    if not match: 
-        return await ctx.send(f"{E_ERROR} Match ID `#{match_id}` not found.")
-    
-    desc = f"**Game:** {match['game'].title()}\n**Pot:** {match['total_pot']:,} {match['currency'].upper()}\n\n**Results:**\n"
+    if not match: return await ctx.send(f"{E_ERROR} Match ID `#{match_id}` not found.")
+    desc = f"**Game:** {match['game'].title()}\n**Pot:** {match['total_pot']:,}\n\n**Results:**\n"
     for p in match.get("results", []):
         desc += f"{E_ARROW} {p['name']}: {'Won' if p['amount']>0 else 'Lost'} {abs(p['amount']):,}\n"
-        
-    embed = discord.Embed(title=f"{E_BOOK} RECEIPT: #{match['match_id']}", description=desc, color=0x3498db)
-    await ctx.send(embed=embed)
+    await ctx.send(embed=discord.Embed(title=f"RECEIPT: #{match['match_id']}", description=desc, color=0x3498db))
     
 # ==========================================================
 # 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE 
