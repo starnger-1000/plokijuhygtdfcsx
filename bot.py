@@ -1765,6 +1765,7 @@ class GambleSetupView(discord.ui.View):
         self.wager = 0
         self.players = [{'id': host.id, 'name': host.display_name, 'is_bot': False}]
         
+        # Initial Game Selection
         self.game_select = discord.ui.Select(placeholder="Select a Casino Game...", options=[
             discord.SelectOption(label="High or Low", value="high_low", emoji=discord.PartialEmoji.from_str(E_DICE)),
             discord.SelectOption(label="Death Roll", value="death_roll", emoji=discord.PartialEmoji.from_str(E_ROLL)),
@@ -1775,29 +1776,39 @@ class GambleSetupView(discord.ui.View):
         self.add_item(self.game_select)
 
     async def game_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
+        if interaction.user.id != self.host.id: 
+            return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
+        
         self.game = self.game_select.values[0]
         self.clear_items()
         
+        # Currency Selection
         curr_select = discord.ui.Select(placeholder="Select Currency...", options=[
             discord.SelectOption(label="Cash ($)", value="cash", emoji=discord.PartialEmoji.from_str(E_MONEY)),
             discord.SelectOption(label="Pokecoins (PC)", value="pc", emoji=discord.PartialEmoji.from_str(E_ITEMBOX)),
             discord.SelectOption(label="Shiny Coins (SC)", value="sc", emoji=discord.PartialEmoji.from_str(E_CROWN))
         ])
-        curr_select.callback = self.curr_callback
+        
+        # Fixed: Defined the callback properly
+        async def curr_cb(i: discord.Interaction):
+            if i.user.id != self.host.id: return
+            self.currency = curr_select.values[0]
+            await self.render_lobby(i)
+            
+        curr_select.callback = curr_cb
         self.add_item(curr_select)
         
-        embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Game selected: **{self.game.replace('_', ' ').title()}**\nWhat are we wagering today?", color=0xe67e22)
+        embed = discord.Embed(
+            title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", 
+            description=f"{E_ARROW} Game selected: **{self.game.replace('_', ' ').title()}**\nWhat are we wagering today?", 
+            color=0xe67e22
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    async def curr_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
-        self.currency = self.values[0]
-        await self.render_lobby(interaction)
-
-    async def render_lobby(self, interaction):
+    async def render_lobby(self, interaction: discord.Interaction):
         self.clear_items()
         
+        # Build Buttons
         btn_bots = discord.ui.Button(label="Add Bots", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
         btn_bots.callback = self.add_bots_callback
         
@@ -1807,10 +1818,18 @@ class GambleSetupView(discord.ui.View):
         self.add_item(btn_bots)
         self.add_item(btn_wager)
         
-        p_list = "\n".join([f"{i+1}. {p['name']}" for i, p in enumerate(self.players)])
-        embed = discord.Embed(title=f"{E_CROWN} LOBBY SETUP", description=f"{E_ARROW} Currency Locked: **{self.currency.upper()}**\n\n**Current Lobby:**\n{p_list}", color=0xe67e22)
-        if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
-        else: await interaction.response.edit_message(embed=embed, view=self)
+        p_list = "\n".join([f"**#{i+1}.** {p['name']}" for i, p in enumerate(self.players)])
+        embed = discord.Embed(
+            title=f"{E_CROWN} LOBBY SETUP", 
+            description=f"{E_ARROW} Currency Locked: **{self.currency.upper()}**\n\n**Current Lobby:**\n{p_list}", 
+            color=0xe67e22
+        )
+        
+        # Fixed: Interaction handling to prevent "Interaction Failed"
+        if interaction.response.is_done():
+            await interaction.message.edit(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
     async def add_bots_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.host.id: return
@@ -1819,10 +1838,8 @@ class GambleSetupView(discord.ui.View):
 
     async def set_wager_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.host.id: return
-        
-        # This opens the pop-up window for ANY wager amount
-        modal = WagerModal(self)
-        await interaction.response.send_modal(modal)
+        # Using the Modal pop-up
+        await interaction.response.send_modal(WagerModal(self))
 
     async def audit_and_confirm(self, interaction: discord.Interaction):
         broke_players = []
