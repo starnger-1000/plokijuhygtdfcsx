@@ -1669,7 +1669,18 @@ async def settleevent_prefix(ctx):
     if not event: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} No active event to settle.", color=0xff0000))
     
     embed = discord.Embed(title=f"{E_ADMIN} EVENT SETTLEMENT PANEL", description=f"{E_ARROW} Click the buttons to input real-life scores. Once all are green, click Process Payouts.", color=0xe67e22)
+    # THIS WAS THE MISSING LINE:
+    await ctx.send(embed=embed, view=SettleEventView(event))
 
+@bot.tree.command(name="settleevent", description="Admin: Settle the active prediction event.")
+@discord.app_commands.default_permissions(administrator=True)
+async def settleevent_slash(interaction: discord.Interaction):
+    event = prediction_events_col.find_one({"status": "active"})
+    if not event: return await interaction.response.send_message(embed=discord.Embed(description=f"{E_ERROR} No active event to settle.", color=0xff0000), ephemeral=True)
+    
+    embed = discord.Embed(title=f"{E_ADMIN} EVENT SETTLEMENT PANEL", description=f"{E_ARROW} Click the buttons to input real-life scores. Once all are green, click Process Payouts.", color=0xe67e22)
+    await interaction.response.send_message(embed=embed, view=SettleEventView(event))
+    
 # ==========================================================
 # 📅 PREMIUM SERVER SCHEDULE & REMINDER SYSTEM
 # ==========================================================
