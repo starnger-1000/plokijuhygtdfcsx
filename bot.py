@@ -3214,8 +3214,7 @@ QUEST_CONFIG = {
             "event": {"target": 1, "desc": "Participate in Event", "reward": 30000},
             "giveaway": {"target": 1, "desc": "Enter a Giveaway", "reward": 15000},
             "shop": {"target": 1, "desc": "Buy from Shop", "reward": 100000},
-            "auc_bid": {"target": 5, "desc": "Place Live Bids", "reward": 50000},
-            "auc_win": {"target": 1, "desc": "Win an Auction", "reward": 100000}
+            "auc_bid": {"target": 5, "desc": "Place Live Bids", "reward": 50000}
         }
     },
     "weekly": {
@@ -3229,8 +3228,6 @@ QUEST_CONFIG = {
             "giveaway": {"target": 7, "desc": "Giveaways Entered", "reward": 150000},
             "shop": {"target": 5, "desc": "Shop Purchases", "reward": 100000},
             "auc_bid": {"target": 25, "desc": "Place Live Bids", "reward": 250000},
-            "auc_win": {"target": 3, "desc": "Win Auctions", "reward": 300000},
-            "auc_sell": {"target": 2, "desc": "Sell via Auction", "reward": 200000}
         }
     },
     "monthly": {
@@ -3246,8 +3243,6 @@ QUEST_CONFIG = {
             "duelist_club": {"target": 1, "desc": "Register Duelist/Buy Club", "reward": 1000000},
             "shares": {"target": 1, "desc": "Buy/Sell Shares", "reward": 500000},
             "auc_bid": {"target": 100, "desc": "Place Live Bids", "reward": 1000000},
-            "auc_win": {"target": 10, "desc": "Win Auctions", "reward": 1500000},
-            "auc_sell": {"target": 5, "desc": "Sell via Auction", "reward": 1000000}
         }
     },
     "yearly": {
@@ -3262,8 +3257,6 @@ QUEST_CONFIG = {
             "shop": {"target": 150, "desc": "Shop Purchases", "reward": 100000000},
             "invest": {"target": 50000000, "desc": "Club/Share Value Bought", "reward": 100000000},
             "auc_bid": {"target": 5000, "desc": "Place Live Bids", "reward": 60000000},    # 60M Coins
-            "auc_win": {"target": 500, "desc": "Win Auctions", "reward": 100000000},       # 100M Coins
-            "auc_sell": {"target": 250, "desc": "Sell via Auction", "reward": 75000000},   # 75M Coins
         }
     },
     "career": {
@@ -3279,8 +3272,6 @@ QUEST_CONFIG = {
             "club_val": {"target": 150000000, "desc": "Buy Club Worth 150m", "reward": 300000000},
             "share_val": {"target": 100000000, "desc": "Share Trade Volume", "reward": 150000000},
             "auc_bid": {"target": 25000, "desc": "Place Live Bids", "reward": 500000000},   # 500M Coins
-            "auc_win": {"target": 2500, "desc": "Win Auctions", "reward": 1000000000},      # 1 Billion Coins
-            "auc_sell": {"target": 1250, "desc": "Sell via Auction", "reward": 500000000},  # 500M Coins
         }
     }
 }
