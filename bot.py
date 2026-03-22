@@ -1802,181 +1802,134 @@ class WagerModal(discord.ui.Modal, title="Casino Buy-In"):
             await interaction.response.send_message(f"{E_ERROR} Invalid amount entered!", ephemeral=True)
 
 
-class GambleSetupView(discord.ui.View):
-    def __init__(self, host, invited_users):
-        super().__init__(timeout=300)
+class GamblePanel(discord.ui.View):
+    def __init__(self, host, amount: int):
+        super().__init__(timeout=60)
         self.host = host
-        self.invited_ids = [u.id for u in invited_users] if invited_users else []
-        self.accepted_users = [{'id': host.id, 'name': host.display_name, 'is_bot': False}]
-        self.game = None
-        self.currency = None
-        self.wager = 0
+        self.amount = amount
+        self.players = [host] # Real human players
+        self.bots = 0 # Counter for bot players
 
-        # PHASE 1: INITIAL LOBBY STATE
-        self.btn_accept = discord.ui.Button(label="Accept Invite", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
-        self.btn_accept.callback = self.accept_cb
-        
-        self.btn_setup = discord.ui.Button(label="Host: Configure Game", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_MONEY))
-        self.btn_setup.callback = self.setup_cb
+    # --- 1. JOIN BUTTON ---
+    @discord.ui.button(label="Join Gamble", emoji=E_DICE, style=discord.ButtonStyle.blurple, custom_id="join_gamble")
+    async def join_gamble(self, interaction: discord.Interaction, button: discord.ui.Button):
+        w = get_wallet(interaction.user.id)
+        user_balance = int(w.get("balance", 0)) if w else 0
 
-        if self.invited_ids: self.add_item(self.btn_accept)
-        self.add_item(self.btn_setup)
+        if user_balance < self.amount:
+            return await interaction.response.send_message(f"{E_ERROR} You don't have enough! You only have **${user_balance:,}**.", ephemeral=True)
 
-    async def accept_cb(self, interaction: discord.Interaction):
-        if interaction.user.id not in self.invited_ids:
-            return await interaction.response.send_message(f"{E_ERROR} You weren't invited to this table!", ephemeral=True)
-        if any(p['id'] == interaction.user.id for p in self.accepted_users):
-            return await interaction.response.send_message(f"{E_ALERT} You are already seated!", ephemeral=True)
-        
-        self.accepted_users.append({'id': interaction.user.id, 'name': interaction.user.display_name, 'is_bot': False})
-        await interaction.response.send_message(f"{E_SUCCESS} You have joined the table.", ephemeral=True)
+        if interaction.user in self.players:
+            return await interaction.response.send_message(f"{E_ERROR} You're already in this gamble!", ephemeral=True)
+
+        self.players.append(interaction.user)
         await self.update_lobby_embed(interaction)
 
-    async def update_lobby_embed(self, interaction):
-        p_list = "\n".join([f"{E_ARROW} **{p['name']}**" for p in self.accepted_users])
-        embed = interaction.message.embeds[0]
-        embed.description = f"**Players Seated:**\n{p_list}"
-        await interaction.message.edit(embed=embed, view=self)
-
-    # PHASE 2: GAME SELECTION
-    async def setup_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: 
-            return await interaction.response.send_message(f"{E_ERROR} Only the host can configure the lobby.", ephemeral=True)
-        
-        await interaction.response.defer()
-        self.clear_items()
-        
-        game_select = discord.ui.Select(placeholder="Step 1: Select a Casino Game...", options=[
-            discord.SelectOption(label="High or Low", value="high_low", emoji=discord.PartialEmoji.from_str(E_DICE)),
-            discord.SelectOption(label="Death Roll", value="death_roll", emoji=discord.PartialEmoji.from_str(E_ROLL)),
-            discord.SelectOption(label="Slot Machine", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
-            discord.SelectOption(label="Roulette", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
-        ])
-        game_select.callback = self.game_cb
-        self.add_item(game_select)
-        
-        embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ACTIVE} Host is configuring the table...\n\n**Step 1:** Select the game mode.", color=0xe67e22)
-        await interaction.message.edit(embed=embed, view=self)
-
-    # PHASE 3: CURRENCY SELECTION
-    async def game_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return
-        await interaction.response.defer()
-        
-        self.game = self.children[0].values[0]
-        self.clear_items()
-        
-        curr_select = discord.ui.Select(placeholder="Step 2: Select Currency...", options=[
-            discord.SelectOption(label="Cash ($)", value="balance", emoji=discord.PartialEmoji.from_str(E_MONEY)),
-            discord.SelectOption(label="Pokecoins (PC)", value="pc", emoji=discord.PartialEmoji.from_str(E_ITEMBOX)),
-            discord.SelectOption(label="Shiny Coins (SC)", value="shiny_coins", emoji=discord.PartialEmoji.from_str(E_CROWN))
-        ])
-        curr_select.callback = self.curr_cb
-        self.add_item(curr_select)
-        
-        embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Game Locked: **{self.game.replace('_', ' ').title()}**\n\n**Step 2:** What currency are we gambling with?", color=0xe67e22)
-        await interaction.message.edit(embed=embed, view=self)
-
-    # PHASE 4: FINAL WAGER SETTINGS
-    async def curr_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return
-        self.currency = self.children[0].values[0]
-        
-        self.clear_items()
-        btn_bots = discord.ui.Button(label="Add AI Bots", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
-        btn_bots.callback = self.add_bots_cb
-        
-        btn_wager = discord.ui.Button(label="Set Wager & Audit", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_MONEY))
-        btn_wager.callback = self.set_wager_cb
-        
-        self.add_item(btn_bots)
-        self.add_item(btn_wager)
-        
-        p_list = "\n".join([f"{E_ARROW} **{p['name']}**" for p in self.accepted_users])
-        embed = discord.Embed(title=f"{E_CROWN} LOBBY SETUP", description=f"{E_ARROW} Currency Locked: **{self.currency.upper()}**\n\n**Players Seated:**\n{p_list}\n\n**Step 3:** Add bots if needed, then set the wager.", color=0xe67e22)
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def add_bots_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return
-        await interaction.response.defer()
-        self.accepted_users.append({'id': random.randint(1, 99), 'name': f"Ze Bot {len(self.accepted_users)}", 'is_bot': True})
-        
-        p_list = "\n".join([f"{E_ARROW} **{p['name']}**" for p in self.accepted_users])
-        embed = interaction.message.embeds[0]
-        embed.description = f"{E_ARROW} Currency Locked: **{self.currency.upper()}**\n\n**Players Seated:**\n{p_list}\n\n**Step 3:** Add bots if needed, then set the wager."
-        await interaction.message.edit(embed=embed, view=self)
-
-    async def set_wager_cb(self, interaction: discord.Interaction):
-        if interaction.user.id != self.host.id: return
-        await interaction.response.send_modal(WagerModal(self))
-
-    # PHASE 5: THE AUDIT & CONFIRMATION
-    async def audit_and_confirm(self, interaction: discord.Interaction):
-        broke_players = []
-        for p in self.accepted_users:
-            if not p['is_bot']:
-                # USING YOUR EXACT get_wallet LOGIC HERE
-                w = get_wallet(p['id']) 
-                bal = w.get(self.currency, 0)
-                if bal < self.wager:
-                    broke_players.append(p['name'])
-
-        self.clear_items()
-        if broke_players:
-            b_names = ", ".join(broke_players)
-            embed = discord.Embed(title=f"{E_ERROR} AUDIT FAILED", description=f"{E_ARROW} {b_names} cannot afford the **{self.wager:,}** buy-in.\n\nKick them and play?", color=0xff0000)
-            btn_kick = discord.ui.Button(label="Kick Broke Players", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
+    # --- 2. ADD BOT BUTTON (Host Only) ---
+    @discord.ui.button(label="Add Bot", emoji=E_ACTIVE, style=discord.ButtonStyle.secondary, custom_id="add_bot")
+    async def add_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.host:
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can add bots!", ephemeral=True)
             
-            async def kick_cb(i):
-                await i.response.defer()
-                self.accepted_users = [p for p in self.accepted_users if p['name'] not in broke_players]
-                await self.audit_and_confirm(i)
-                
-            btn_kick.callback = kick_cb
-            self.add_item(btn_kick)
-            return await interaction.response.edit_message(embed=embed, view=self)
+        self.bots += 1
+        await self.update_lobby_embed(interaction)
 
-        pot = self.wager * len(self.accepted_users)
-        embed = discord.Embed(title=f"{E_ACTIVE} FINAL CONFIRMATION", description=f"**Game:** {self.game.replace('_', ' ').title()}\n**Wager:** {self.wager:,} {self.currency.upper()} each\n**Total Pot:** {pot:,} {self.currency.upper()}", color=0x2ecc71)
+    # --- 3. START GAMBLE BUTTON (Host Only) ---
+    @discord.ui.button(label="Start Gamble", emoji=E_SUCCESS, style=discord.ButtonStyle.green, custom_id="start_gamble")
+    async def start_gamble(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.host:
+            return await interaction.response.send_message(f"{E_ERROR} Only the host can start the gamble!", ephemeral=True)
         
-        btn_start = discord.ui.Button(label="Confirm & Start", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
-        async def start_cb(i):
-            await i.response.defer()
-            if self.game == "high_low":
-                await i.message.edit(embed=discord.Embed(title=f"{E_DICE} HIGH OR LOW: THE VOTE", description=f"{E_ARROW} Pot: **{pot:,} {self.currency.upper()}**\nHost {self.host.mention}, what are we playing for?", color=0xe67e22).set_image(url=GIF_DICE), view=HighLowGameView(self.host, self.accepted_users, self.wager, self.currency, pot))
-            elif self.game == "death_roll":
-                game_view = DeathRollGameView(self.host, self.accepted_users, self.wager, self.currency, pot)
-                await game_view.init_game(i)
-            elif self.game == "slots":
-                await run_slots_game(i, self.host, self.accepted_users, self.wager, self.currency, pot)
-            elif self.game == "roulette":
-                game_view = RouletteBetView(self.host, self.accepted_users, self.wager, self.currency, pot)
-                await game_view.update_lobby(i)
-                
-        btn_start.callback = start_cb
-        self.add_item(btn_start)
+        if len(self.players) + self.bots < 2:
+            return await interaction.response.send_message(f"{E_ERROR} You need at least 2 players (or bots) to start!", ephemeral=True)
+
+        # Disable all buttons so no one else can join/click
+        for child in self.children:
+            child.disabled = True
+
+        # --- THE TRANSFORMATION: ROLLING PHASE ---
+        embed = interaction.message.embeds[0]
+        embed.color = 0xf1c40f # Gold/Yellow for suspense
+        embed.title = f"{E_ROLL} Rolling the Dice..."
+        embed.description = f"The pot is locked at **{E_MONEY} ${(len(self.players) + self.bots) * self.amount:,}**!"
         await interaction.response.edit_message(embed=embed, view=self)
 
+        # Suspense delay
+        await asyncio.sleep(3.5)
 
-# --- COMMAND ENTRY POINT ---
-@bot.hybrid_command(name="gamble", aliases=["casino"], description="Open the High Roller Lounge.")
-async def gamble(ctx, members: commands.Greedy[discord.Member] = None):
-    mentions = ""
-    desc = f"{ctx.author.mention} is opening a Casino Table."
+        # --- LOGIC & PAYOUT PHASE ---
+        total_participants = self.players + [f"Bot {i+1}" for i in range(self.bots)]
+        winner = random.choice(total_participants)
+        pot_size = (len(self.players) + self.bots) * self.amount
+
+        # Deduct buy-in from all real players
+        for p in self.players:
+            wallets_col.update_one({"user_id": str(p.id)}, {"$inc": {"balance": -self.amount}})
+
+        # Reward winner if they are a real player
+        winner_text = ""
+        if isinstance(winner, discord.Member):
+            wallets_col.update_one({"user_id": str(winner.id)}, {"$inc": {"balance": pot_size}})
+            winner_text = f"{E_CROWN} **WINNER:** {winner.mention}\n{E_MONEY} **Won:** ${pot_size:,}"
+        else:
+            winner_text = f"{E_CROWN} **WINNER:** {winner} (The House Wins!)\n{E_MONEY} **Lost:** All player bets were taken."
+
+        # --- THE TRANSFORMATION: RESULT PHASE ---
+        embed.color = 0x2ecc71 # Green for finished
+        embed.title = f"{E_SUCCESS} Gamble Finished!"
+        embed.description = winner_text
+        
+        # Keep the final roster in the embed
+        embed.clear_fields()
+        final_roster = "\n".join([f"{E_ACTIVE} {p.mention}" for p in self.players])
+        if self.bots > 0:
+            final_roster += f"\n{E_ACTIVE} *{self.bots}x Bots*"
+        embed.add_field(name="Final Roster", value=final_roster, inline=False)
+
+        await interaction.message.edit(embed=embed, view=self)
+
+    # Helper to update the embed during the Lobby phase
+    async def update_lobby_embed(self, interaction):
+        players_list = "\n".join([f"{E_ACTIVE} {p.mention}" for p in self.players])
+        if self.bots > 0:
+            players_list += f"\n{E_ACTIVE} *{self.bots}x Bots*"
+            
+        embed = interaction.message.embeds[0]
+        embed.set_field_at(0, name="Current Players", value=players_list, inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+# ---------- COMMAND REGISTRATION ----------
+
+async def send_gamble_panel(ctx_or_interaction, user, amount: int):
+    embed = discord.Embed(
+        title=f"{E_DICE} Multiplayer Gamble Lobby",
+        description=f"**Bet Amount:** {E_MONEY} {amount:,}\nClick **Join Gamble** to enter!",
+        color=0x2b2d31 # Premium dark look
+    )
+    embed.add_field(name="Current Players", value=f"{E_ACTIVE} {user.mention}", inline=False)
     
-    if members:
-        mentions = " ".join([m.mention for m in members])
-        desc += f"\n\n{E_ACTIVE} **Invited:** {mentions}\nClick **Accept Invite** below to reserve your seat."
+    view = GamblePanel(host=user, amount=amount)
     
-    embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=desc, color=0xe67e22)
-    view = GambleSetupView(ctx.author, members)
-    
-    # Send mentions outside the embed so it pings them
-    if mentions:
-        await ctx.send(content=mentions, embed=embed, view=view)
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        await ctx_or_interaction.response.send_message(embed=embed, view=view)
     else:
-        await ctx.send(embed=embed, view=view)
+        await ctx_or_interaction.send(embed=embed, view=view)
+
+@bot.command(name="gamble", aliases=["g"])
+async def gamble_prefix(ctx, amount: HumanInt):
+    w = get_wallet(ctx.author.id)
+    host_balance = int(w.get("balance", 0)) if w else 0
+    if host_balance < amount:
+        return await ctx.send(f"{E_ERROR} You don't have enough! You only have **${host_balance:,}**.")
+    await send_gamble_panel(ctx, ctx.author, amount)
+
+@bot.tree.command(name="gamble", description="Start a multiplayer gamble panel")
+async def gamble_slash(interaction: discord.Interaction, amount: int):
+    w = get_wallet(interaction.user.id)
+    host_balance = int(w.get("balance", 0)) if w else 0
+    if host_balance < amount:
+        return await interaction.response.send_message(f"{E_ERROR} You don't have enough! You only have **${host_balance:,}**.", ephemeral=True)
+    await send_gamble_panel(interaction, interaction.user, amount)
 
 # ==========================================================
 # PREMIUM PREDICTION SYSTEM 
