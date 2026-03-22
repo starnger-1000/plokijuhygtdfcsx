@@ -1203,7 +1203,7 @@ def get_gamble_profile(user_id):
     return profile
 
 # --- VIP PROFILE COMMAND ---
-@bot.hybrid_command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
+@bot.command(name="gamblingprofile", aliases=["gblp"], description="View your Casino VIP Card.")
 async def gamblingprofile(ctx, member: discord.Member = None):
     target = member or ctx.author
     try:
@@ -1260,7 +1260,7 @@ class GambleLBView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(GambleLBSelect())
 
-@bot.hybrid_command(name="gamblingleaderboard", aliases=["glb"])
+@bot.command(name="gamblingleaderboard", aliases=["glb"])
 async def gamblingleaderboard(ctx):
     top_players = list(gamble_profiles_col.find().sort("net_profit", -1).limit(10))
     desc = f"{E_ARROW} Category: **Highest Net Profit**\n\n"
@@ -1272,7 +1272,7 @@ async def gamblingleaderboard(ctx):
     await ctx.send(embed=discord.Embed(title=f"{E_CROWN} HALL OF FAME", description=desc, color=0xf1c40f), view=GambleLBView())
 
 # --- HISTORY & RECEIPTS ---
-@bot.hybrid_command(name="listgambles", aliases=["lgs"])
+@bot.command(name="listgambles", aliases=["lgs"])
 async def listgambles(ctx):
     uid = str(ctx.author.id)
     history = list(gamble_history_col.find({"players": uid}).sort("timestamp", -1).limit(10))
@@ -1286,7 +1286,7 @@ async def listgambles(ctx):
         desc += f"{E_ARROW} `#{h.get('match_id', '0000')}` | {h.get('game','game').title()} | **{sign}{amt:,}**\n"
     await ctx.send(embed=discord.Embed(title="RECENT GAMES", description=desc, color=0x3498db))
 
-@bot.hybrid_command(name="infogamble", aliases=["gbinfo"])
+@bot.command(name="infogamble", aliases=["gbinfo"])
 async def infogamble(ctx, match_id: str):
     match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
     if not match: return await ctx.send(f"{E_ERROR} Match ID `#{match_id}` not found.")
@@ -1296,7 +1296,7 @@ async def infogamble(ctx, match_id: str):
     await ctx.send(embed=discord.Embed(title=f"RECEIPT: #{match['match_id']}", description=desc, color=0x3498db))
     
 # ==========================================================
-# 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE 
+# 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
 # ========================================================== 
 
 # --- HIGH OR LOW GAME CLASS ---
