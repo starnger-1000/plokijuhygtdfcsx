@@ -1526,7 +1526,7 @@ class DeathRollGameView(discord.ui.View):
             self.is_processing = False
             await self.render_state(interaction)
 
-   async def end_game(self, interaction, loser):
+    async def end_game(self, interaction, loser):
         house_cut = int(self.pot * 0.05)
         win_pool = self.pot - house_cut
         winners = [p for p in self.players if p['id'] != loser['id']]
