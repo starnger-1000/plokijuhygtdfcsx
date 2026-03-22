@@ -1182,6 +1182,20 @@ async def pc_claim_alert_task():
                 
         await asyncio.sleep(60) # Check every 60 seconds
     
+async def update_casino_balance(user_id, amount: int, currency: str):
+    """
+    Safely adds or deducts money from the personal_wallets database 
+    using the exact document _id to prevent ghost wallets.
+    """
+    w = get_wallet(user_id)
+    if not w:
+        return 
+        
+    wallets_col.update_one(
+        {"_id": w["_id"]}, 
+        {"$inc": {currency: amount}}
+    )
+
 # ==========================================================
 # 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
 # ========================================================== 
