@@ -40,7 +40,8 @@ LOG_CHANNELS = {
     "shop_log": 1446017729340379246, # Pokemon Confirmation Deal Embed Message
     "shop_main": 1446018190093058222, # Shop interface
     "login_log": 1455496870003740736,  # Fixed: Changed from Variable = Value to "key": Value
-    "chat_channel": 975275349573271552 # Daily Task Channel
+    "chat_channel": 975275349573271552, # Daily Task Channel
+    LOG_CHANNEL_ID = 1485247028023001180 # Your hidden logging channel gamble
 }
 
 # Constants
@@ -142,6 +143,10 @@ E_GIVEAWAY = "<a:gw:1443251079705001984>"
 E_CHAT = "<a:text:1443251311939293267>"
 CONFIRM_EMOJI = "<a:verified:962942818886770688>"
 DENY_EMOJI = "<a:cross2:972155180185452544>"
+E_DICE = "<a:rollingdice:1345091274226663494>"
+E_ROLL = "<a:highroll:1333787513890017281>"
+E_SLOTS = "<a:777casino:761608156119826492>"
+E_ROULETTE = "<a:roullet:678484862956470292>"
 
 BATTLE_BANTER = [
     "<a:redfire1:1443251827490684938> Absolute demolition! **{winner}** tore **{loser}** apart. {l_emoji}",
@@ -158,6 +163,11 @@ E_LEAGUE = "<:league:1482846958941900890>"
 E_SUPERCUP = "<:supercup:1482847038310711357>"
 E_BALLONDOR = "<:balondor:1482847124562640967>"
 E_SUPERBALLONDOR = "<:superbalondor:1482847189515374702>"
+
+GIF_DICE = "https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExbDR2anliZzN2YTM2bW83cDFsOHhsdXRxaWhlYzNnZXRyd29vYWJrMyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/WrMixpJW1daLJ5Fs9T/giphy.gif"
+GIF_DEATHROLL = "https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExOHJicWpyamxheW8xNG53ZGdudWUwb3hnN292N3R6cXBtbTRxZmJnMSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/15mV22EcWi5JZtGgvr/giphy.gif"
+GIF_SLOTS = "https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExODZnenJzeTZuYW85bjk5eDhmamlyNWdpYmZndmJzNGM1aGh5eGxyNCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/JhIObtbDKii94f58eo/giphy.gif"
+GIF_ROULETTE = "https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExMm5wbm5jYnRqY2diYWN2OG8wczd0YTR2M294bjc2bHpzN2hpaGMwbiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/9vShOsoMJIf99V9FfG/giphy.gif"
 
 DONOR_WEIGHTS = {
     972809181444861984: 1, 972809182224994354: 1, 972809183374225478: 2,
@@ -212,6 +222,8 @@ if db is not None:
     schedule_events_col = db["schedule_events"]
     schedule_reminders_col = db["schedule_reminders"]
     tournaments_col = db["tournaments"]
+    gamble_history_col = db["gamble_history"]
+    gamble_profiles_col = db["gamble_profiles"]
 
 PREDICTION_PING_ROLE = "<@&1458516530739286111>"
 PREDICTION_LOG_CHANNEL_ID = 1445461752094396446
@@ -1168,6 +1180,677 @@ async def pc_claim_alert_task():
                 db.pc_claims.update_one({"_id": claim["_id"]}, {"$set": {"alert_sent": True}})
                 
         await asyncio.sleep(60) # Check every 60 seconds
+
+# ==========================================================
+# 🎰 THE HIGH ROLLER LOUNGE: CASINO ENGINE (PHASE 1)
+# ==========================================================
+
+# --- HELPER: GET OR CREATE GAMBLE PROFILE ---
+def get_gamble_profile(user_id):
+    profile = gamble_profiles_col.find_one({"user_id": user_id})
+    if not profile:
+        profile = {
+            "user_id": user_id, "net_profit": 0, "total_wagered": 0,
+            "games_played": 0, "biggest_win": 0, "biggest_loss": 0,
+            "game_stats": {
+                "high_low": {"wins": 0, "played": 0}, "death_roll": {"wins": 0, "played": 0},
+                "slots": {"wins": 0, "played": 0}, "roulette": {"wins": 0, "played": 0}
+            }
+        }
+    return profile
+
+# --- CASINO AUTO-LOGGER ---
+async def log_casino_receipt(bot, match_id):
+    match = gamble_history_col.find_one({"match_id": match_id})
+    if not match: return
+    
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel: return
+    
+    game_emojis = {"high_low": E_DICE, "death_roll": E_ROLL, "slots": E_SLOTS, "roulette": E_ROULETTE}
+    icon = game_emojis.get(match["game"], E_STAR)
+    
+    desc = f"{icon} **Game:** {match['game'].replace('_', ' ').title()}\n"
+    desc += f"{E_MONEY} **Currency:** {match['currency'].upper()}\n"
+    desc += f"{E_ITEMBOX} **Total Pot:** {match['total_pot']:,}\n"
+    desc += f"{E_ACTIVE} **Date:** <t:{match['timestamp']}:F>\n\n**Results:**\n"
+    
+    for player in match.get("results", []):
+        name = player["name"]
+        amt = player["amount"]
+        if amt > 0: desc += f"{E_ARROW} **{name}:** Won {amt:,} {match['currency'].upper()}\n"
+        else: desc += f"{E_ARROW} **{name}:** Lost {abs(amt):,} {match['currency'].upper()}\n"
+        
+    embed = discord.Embed(title=f"{E_BOOK} CASINO RECEIPT: #{match_id}", description=desc, color=0xf1c40f)
+    await channel.send(embed=embed)
+
+# --- USER: VIP GAMBLING PROFILE ---
+@bot.command(name="gamblingprofile", aliases=["gp"], description="View your Casino VIP Card.")
+async def gamblingprofile_prefix(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    prof = get_gamble_profile(target.id)
+    
+    best_game = "None"
+    best_rate = -1
+    for game, stats in prof["game_stats"].items():
+        if stats["played"] > 0:
+            rate = stats["wins"] / stats["played"]
+            if rate > best_rate:
+                best_rate = rate
+                best_game = game.replace("_", " ").title()
+                
+    color = 0x2ecc71 if prof["net_profit"] >= 0 else 0xe74c3c
+    sign = "+" if prof["net_profit"] >= 0 else ""
+    
+    desc = f"**{E_ITEMBOX} LIFETIME FINANCES**\n"
+    desc += f"{E_MONEY} **Net Profit/Loss:** {sign}{prof['net_profit']:,}\n"
+    desc += f"{E_ACTIVE} **Total Wagered:** {prof['total_wagered']:,}\n\n"
+    desc += f"**{E_SLOTS} GAMBLING METRICS**\n"
+    desc += f"{E_ARROW} **Best Game:** {best_game}\n"
+    desc += f"{E_ARROW} **Games Played:** {prof['games_played']:,}\n"
+    desc += f"{E_ARROW} **Biggest Win:** +{prof['biggest_win']:,}\n"
+    desc += f"{E_ARROW} **Biggest Loss:** -{prof['biggest_loss']:,}\n"
+    
+    embed = discord.Embed(title=f"{E_CROWN} CASINO VIP: {target.display_name}", description=desc, color=color)
+    await ctx.send(embed=embed)
+
+# --- USER: GAMBLING LEADERBOARD (TRANSFORMING) ---
+class GambleLBSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Highest Net Profit", value="profit", emoji=discord.PartialEmoji.from_str(E_MONEY)),
+            discord.SelectOption(label="Top Slot Players", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
+            discord.SelectOption(label="Top Roulette Players", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
+        ]
+        super().__init__(placeholder="Sort Leaderboard...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        sort_key = "net_profit" if self.values[0] == "profit" else f"game_stats.{self.values[0]}.wins"
+        top_players = list(gamble_profiles_col.find().sort(sort_key, -1).limit(10))
+        
+        desc = f"{E_ARROW} Category: **{self.values[0].replace('_', ' ').title()}**\n\n"
+        for i, p in enumerate(top_players, 1):
+            val = p.get('net_profit', 0) if self.values[0] == "profit" else p.get('game_stats', {}).get(self.values[0], {}).get('wins', 0)
+            sign = "+" if self.values[0] == "profit" and val >= 0 else ""
+            name = bot.get_user(p["user_id"])
+            name = name.display_name if name else f"Ze Bot {i}" if p["user_id"] < 100 else "Unknown"
+            desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{val:,})\n"
+            
+        embed = discord.Embed(title=f"{E_CROWN} HIGH ROLLER HALL OF FAME", description=desc or "No data yet.", color=0xf1c40f)
+        await interaction.response.edit_message(embed=embed)
+
+class GambleLBView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GambleLBSelect())
+
+@bot.command(name="gamblingleaderboard", aliases=["glb"], description="View the Casino Leaderboards.")
+async def gamblingleaderboard_prefix(ctx):
+    top_players = list(gamble_profiles_col.find().sort("net_profit", -1).limit(10))
+    desc = f"{E_ARROW} Category: **Highest Net Profit**\n\n"
+    for i, p in enumerate(top_players, 1):
+        sign = "+" if p["net_profit"] >= 0 else ""
+        name = bot.get_user(p["user_id"])
+        name = name.display_name if name else f"Ze Bot {i}" if p["user_id"] < 100 else "Unknown"
+        desc += f"{E_ITEMBOX} **#{i}.** {name} - ({sign}{p['net_profit']:,})\n"
+        
+    embed = discord.Embed(title=f"{E_CROWN} HIGH ROLLER HALL OF FAME", description=desc or "No data yet.", color=0xf1c40f)
+    await ctx.send(embed=embed, view=GambleLBView())
+
+# --- USER & ADMIN: RECEIPT & HISTORY COMMANDS ---
+@bot.command(name="infogamble", aliases=["ig"], description="Look up a specific Casino Receipt.")
+async def infogamble_prefix(ctx, match_id: str):
+    match = gamble_history_col.find_one({"match_id": match_id.upper().replace("#", "")})
+    if not match: return await ctx.send(embed=discord.Embed(description=f"{E_ERROR} Could not find Match ID `{match_id}`.", color=0xff0000))
+    
+    desc = f"**Game:** {match['game'].title()} | **Pot:** {match['total_pot']:,} {match['currency'].upper()}\n\n**Results:**\n"
+    for p in match.get("results", []):
+        desc += f"{E_ARROW} {p['name']}: {'Won' if p['amount']>0 else 'Lost'} {abs(p['amount']):,}\n"
+    embed = discord.Embed(title=f"{E_BOOK} RECEIPT: #{match['match_id']}", description=desc, color=0x3498db)
+    await ctx.send(embed=embed)
+
+@bot.command(name="loggamble", aliases=["lgg"], description="Admin: Force log a Casino Receipt.")
+@commands.has_permissions(administrator=True)
+async def loggamble_prefix(ctx, match_id: str):
+    await log_casino_receipt(bot, match_id.upper().replace("#", ""))
+    await ctx.send(embed=discord.Embed(description=f"{E_SUCCESS} Match manually pushed to logging channel.", color=0x2ecc71))
+
+@bot.command(name="listgambles", aliases=["lg"], description="View your recent gambling history.")
+async def listgambles_prefix(ctx):
+    history = list(gamble_history_col.find({"players": ctx.author.id}).sort("timestamp", -1).limit(10))
+    if not history: return await ctx.send(embed=discord.Embed(description=f"{E_ALERT} You haven't played any games yet.", color=0xe67e22))
+    
+    desc = ""
+    for h in history:
+        user_res = next((r for r in h["results"] if r.get("id") == ctx.author.id), None)
+        amt = user_res["amount"] if user_res else 0
+        sign = "+" if amt > 0 else ""
+        desc += f"{E_ARROW} `#{h['match_id']}` | {h['game'].title()} | **{sign}{amt:,}**\n"
+    
+    await ctx.send(embed=discord.Embed(title=f"{E_ITEMBOX} {ctx.author.display_name}'s RECENT GAMES", description=desc, color=0x3498db))
+
+# ==========================================================
+# 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
+# ==========================================================
+
+users_col = db["users"] # Assuming this is where cash/pc/sc is stored
+
+# --- HIGH OR LOW GAME CLASS ---
+class HighLowGameView(discord.ui.View):
+    def __init__(self, host, players, wager, currency, pot):
+        super().__init__(timeout=None)
+        self.host = host
+        self.players = players # List of dicts: {'id': id, 'name': str, 'is_bot': bool}
+        self.wager = wager
+        self.currency = currency
+        self.pot = pot
+        self.match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
+
+    @discord.ui.button(label="Play for HIGH", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ROLL))
+    async def btn_high(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        await self.start_rolling(interaction, True)
+
+    @discord.ui.button(label="Play for LOW", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ROLL))
+    async def btn_low(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Only the host can start!", ephemeral=True)
+        await self.start_rolling(interaction, False)
+
+    async def start_rolling(self, interaction: discord.Interaction, target_high: bool):
+        # 1. Deduct Balances First
+        for p in self.players:
+            if not p['is_bot']:
+                users_col.update_one({"user_id": p['id']}, {"$inc": {self.currency: -self.wager}})
+        
+        # 2. Secret 80% AI Engine
+        bot_wins = random.random() < 0.80
+        results = []
+        for p in self.players:
+            if p['is_bot']:
+                roll = random.randint(85, 100) if (target_high and bot_wins) or (not target_high and not bot_wins) else random.randint(1, 40)
+            else:
+                roll = random.randint(1, 80) if (target_high and bot_wins) or (not target_high and not bot_wins) else random.randint(60, 100)
+            results.append({"player": p, "roll": roll})
+
+        # 3. Sequential Rolling UI (Transforming Embed)
+        target_str = "HIGH" if target_high else "LOW"
+        desc_rolls = ""
+        
+        embed = discord.Embed(title=f"{E_DICE} HIGH OR LOW: ROLLING PHASE", color=0xe67e22)
+        embed.set_image(url=GIF_DICE)
+        await interaction.response.edit_message(embed=embed, view=None)
+        
+        for res in results:
+            # Suspense State
+            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}{E_ROLL} **{res['player']['name']}** is rolling the dice..."
+            await interaction.message.edit(embed=embed)
+            await asyncio.sleep(2) # 2 Second Suspense
+            
+            # Lock Result
+            desc_rolls += f"{E_SUCCESS} **{res['player']['name']}** rolled a **{res['roll']}**!\n"
+            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}"
+            await interaction.message.edit(embed=embed)
+            await asyncio.sleep(1)
+
+        # 4. Calculate Payouts (Dynamic Brackets)
+        results.sort(key=lambda x: x['roll'], reverse=target_high)
+        house_cut = int(self.pot * 0.05)
+        payout_pool = self.pot - house_cut
+        
+        payouts = []
+        if len(self.players) >= 4:
+            shares = [0.50, 0.30, 0.15]
+            winners = 3
+        elif len(self.players) == 3:
+            shares = [0.65, 0.30]
+            winners = 2
+        else:
+            shares = [0.95]
+            winners = 1
+
+        desc_payout = f"Target was **{target_str}**.\n\n**{E_CROWN} THE PODIUM**\n"
+        final_db_results = []
+        
+        for i, res in enumerate(results):
+            amt = 0
+            if i < winners:
+                amt = int(self.pot * shares[i])
+                desc_payout += f"**{i+1}st Place:** {res['player']['name']} ({res['roll']}) - Won **{amt:,} {self.currency.upper()}**\n"
+                if not res['player']['is_bot']:
+                    users_col.update_one({"user_id": res['player']['id']}, {"$inc": {self.currency: amt}})
+                    gamble_profiles_col.update_one({"user_id": res['player']['id']}, {"$inc": {"net_profit": amt - self.wager, "total_wagered": self.wager, "games_played": 1, "game_stats.high_low.wins": 1}}, upsert=True)
+            else:
+                if not res['player']['is_bot']:
+                    gamble_profiles_col.update_one({"user_id": res['player']['id']}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1}}, upsert=True)
+            
+            final_db_results.append({"id": res['player']['id'], "name": res['player']['name'], "amount": amt if amt > 0 else -self.wager})
+
+        desc_payout += f"\n{E_ITEMBOX} **House Cut:** {house_cut:,} {self.currency.upper()} retained by the Casino."
+        
+        # 5. Final Embed & Logging
+        embed.title = f"{E_CROWN} HIGH OR LOW: FINAL RESULTS"
+        embed.description = desc_payout
+        embed.color = 0x2ecc71
+        await interaction.message.edit(embed=embed)
+        
+        # Log to DB
+        gamble_history_col.insert_one({
+            "match_id": self.match_id, "game": "high_low", "currency": self.currency,
+            "total_pot": self.pot, "timestamp": int(asyncio.get_event_loop().time()),
+            "players": [p['id'] for p in self.players if not p['is_bot']], "results": final_db_results
+        })
+        await log_casino_receipt(bot, self.match_id)
+
+# --- DEATH ROLL ENGINE ---
+class DeathRollGameView(discord.ui.View):
+    def __init__(self, host, players, wager, currency, pot):
+        super().__init__(timeout=None)
+        self.host, self.players, self.wager, self.currency, self.pot = host, players, wager, currency, pot
+        self.match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
+        self.current_max = 100000
+        self.turn_idx = 0
+        self.is_processing = False
+
+    async def init_game(self, interaction):
+        for p in self.players:
+            if not p['is_bot']: users_col.update_one({"user_id": p['id']}, {"$inc": {self.currency: -self.wager}})
+        await self.render_state(interaction)
+
+    async def render_state(self, interaction):
+        current_p = self.players[self.turn_idx]
+        embed = discord.Embed(title=f"{E_ROLL} THE DEATH ROLL", description=f"{E_ARROW} The Pot: **{self.pot:,} {self.currency.upper()}**\n{E_ARROW} The Target: Roll out of **{self.current_max:,}**\n\n{E_ROLL} **{current_p['name']}**, it is your turn.", color=0xe74c3c)
+        embed.set_image(url=GIF_DEATHROLL)
+        
+        if self.current_max <= 5: embed.description = f"{E_ACTIVE} **DANGER ZONE** {E_ACTIVE}\n{embed.description}"
+        
+        if current_p['is_bot']:
+            self.clear_items()
+            if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
+            else: await interaction.response.edit_message(embed=embed, view=self)
+            await asyncio.sleep(2)
+            await self.process_roll(interaction, current_p)
+        else:
+            self.clear_items()
+            btn = discord.ui.Button(label="Roll the Dice", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_DICE))
+            async def roll_cb(i):
+                if i.user.id != current_p['id']: return await i.response.send_message(f"{E_ERROR} Not your turn!", ephemeral=True)
+                await self.process_roll(i, current_p)
+            btn.callback = roll_cb
+            self.add_item(btn)
+            if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
+            else: await interaction.response.edit_message(embed=embed, view=self)
+
+    async def process_roll(self, interaction, player):
+        self.is_processing = True
+        
+        # Secret Bot Logic (Safe Drops & Death Dodges)
+        if player['is_bot']:
+            if self.current_max > 10: roll = random.randint(self.current_max // 2, self.current_max)
+            elif self.current_max > 2: roll = random.randint(2, self.current_max)
+            else: roll = random.randint(1, self.current_max) # Forced to risk it
+        else:
+            roll = random.randint(1, self.current_max)
+
+        embed = discord.Embed(title=f"{E_ROLL} THE DEATH ROLL", description=f"{E_SUCCESS} **{player['name']}** rolled a **{roll:,}**!", color=0xe67e22)
+        embed.set_image(url=GIF_DEATHROLL)
+        if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=None)
+        else: await interaction.response.edit_message(embed=embed, view=None)
+        await asyncio.sleep(2)
+
+        if roll == 1:
+            await self.end_game(interaction, player)
+        else:
+            self.current_max = roll
+            self.turn_idx = (self.turn_idx + 1) % len(self.players)
+            self.is_processing = False
+            await self.render_state(interaction)
+
+    async def end_game(self, interaction, loser):
+        house_cut = int(self.pot * 0.05)
+        win_pool = self.pot - house_cut
+        winners = [p for p in self.players if p['id'] != loser['id']]
+        split = win_pool // len(winners)
+
+        desc = f"{E_ERROR} **{loser['name']}** rolled a **1**. They have flatlined.\n\n**{E_CROWN} THE SURVIVORS**\n"
+        db_results = [{"id": loser['id'], "name": loser['name'], "amount": -self.wager}]
+        if not loser['is_bot']: gamble_profiles_col.update_one({"user_id": loser['id']}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1, "biggest_loss": self.wager}}, upsert=True)
+
+        for w in winners:
+            desc += f"{E_ARROW} **{w['name']}** walks away with **{split:,} {self.currency.upper()}**\n"
+            db_results.append({"id": w['id'], "name": w['name'], "amount": split})
+            if not w['is_bot']:
+                users_col.update_one({"user_id": w['id']}, {"$inc": {self.currency: split}})
+                gamble_profiles_col.update_one({"user_id": w['id']}, {"$inc": {"net_profit": split - self.wager, "total_wagered": self.wager, "games_played": 1, "game_stats.death_roll.wins": 1}}, upsert=True)
+
+        desc += f"\n{E_ITEMBOX} **House Cut:** {house_cut:,} {self.currency.upper()}"
+        
+        embed = discord.Embed(title=f"{E_CROWN} DEATH ROLL: GAME OVER", description=desc, color=0x2ecc71)
+        embed.set_image(url=GIF_DEATHROLL)
+        await interaction.message.edit(embed=embed, view=None)
+        
+        gamble_history_col.insert_one({"match_id": self.match_id, "game": "death_roll", "currency": self.currency, "total_pot": self.pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in self.players if not p['is_bot']], "results": db_results})
+        await log_casino_receipt(bot, self.match_id)
+
+
+# --- SLOT MACHINE ENGINE ---
+async def run_slots_game(interaction, host, players, wager, currency, pot):
+    match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
+    for p in players:
+        if not p['is_bot']: users_col.update_one({"user_id": p['id']}, {"$inc": {currency: -wager}})
+
+    # Secret 80% Engine & Pre-Roll Generation
+    bot_wins = random.random() < 0.80
+    player_results = []
+    
+    for p in players:
+        if p['is_bot'] and bot_wins:
+            tier = random.choices(["jackpot", "triple", "pair"], weights=[10, 30, 60])[0]
+            if tier == "jackpot": result = [7, 7, 7]
+            elif tier == "triple": n = random.choice([1,2,3,4,5,6,8,9]); result = [n, n, n]
+            else: n = random.randint(1,9); m = random.choice([x for x in range(1,10) if x != n]); result = [n, n, m]
+        elif not p['is_bot'] and not bot_wins:
+            tier = random.choices(["jackpot", "triple", "pair"], weights=[5, 15, 80])[0]
+            if tier == "jackpot": result = [7, 7, 7]
+            elif tier == "triple": n = random.choice([1,2,3,4,5,6,8,9]); result = [n, n, n]
+            else: n = random.randint(1,9); m = random.choice([x for x in range(1,10) if x != n]); result = [n, n, m]
+        else:
+            result = [random.randint(1,9), random.randint(1,9), random.randint(1,9)]
+        
+        score = 3 if result == [7,7,7] else 2 if len(set(result)) == 1 else 1 if len(set(result)) == 2 else 0
+        player_results.append({"player": p, "reels": result, "score": score})
+
+    embed = discord.Embed(title=f"{E_SLOTS} SLOT PARLOR: LIVE SPINS", color=0xf1c40f)
+    embed.set_image(url=GIF_SLOTS)
+    await interaction.response.edit_message(embed=embed, view=None)
+
+    # Sequential Spin Animation
+    for res in player_results:
+        reels = res['reels']
+        name = res['player']['name']
+        
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n🎰 **{E_SLOTS} | {E_SLOTS} | {E_SLOTS}**"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(1)
+        
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n🎰 **[ {reels[0]} ] | {E_SLOTS} | {E_SLOTS}**"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(1)
+        
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n🎰 **[ {reels[0]} ] | [ {reels[1]} ] | {E_SLOTS}**"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(1)
+        
+        embed.description = f"{E_SUCCESS} **{name}** finished spinning:\n\n🎰 **[ {reels[0]} ] | [ {reels[1]} ] | [ {reels[2]} ]**"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(1)
+
+    # Payout Logic (Highest Tier Only to protect pot)
+    highest_score = max([r['score'] for r in player_results])
+    winners = [r for r in player_results if r['score'] == highest_score and highest_score > 0]
+    
+    if highest_score == 3: win_pct = 0.50
+    elif highest_score == 2: win_pct = 0.25
+    elif highest_score == 1: win_pct = 0.05
+    else: win_pct = 0.0
+
+    total_payout = int(pot * win_pct)
+    house_cut = pot - total_payout
+    
+    desc = f"The reels have stopped! Here is how the table rolled:\n\n**{E_CROWN} THE PAYOUTS**\n"
+    db_results = []
+    
+    for res in player_results:
+        p = res['player']
+        if res in winners:
+            split = total_payout // len(winners)
+            tier_name = "JACKPOT!" if highest_score == 3 else "Triple!" if highest_score == 2 else "Pair!"
+            desc += f"{E_SUCCESS} **{p['name']}** rolled **[ {res['reels'][0]} ] | [ {res['reels'][1]} ] | [ {res['reels'][2]} ]**\n💰 **{tier_name}** Wins **{split:,} {currency.upper()}**\n\n"
+            db_results.append({"id": p['id'], "name": p['name'], "amount": split})
+            if not p['is_bot']:
+                users_col.update_one({"user_id": p['id']}, {"$inc": {currency: split}})
+                gamble_profiles_col.update_one({"user_id": p['id']}, {"$inc": {"net_profit": split - wager, "total_wagered": wager, "games_played": 1, "game_stats.slots.wins": 1}}, upsert=True)
+        else:
+            desc += f"{E_ERROR} **{p['name']}** rolled **[ {res['reels'][0]} ] | [ {res['reels'][1]} ] | [ {res['reels'][2]} ]**\n❌ *No payout.*\n\n"
+            db_results.append({"id": p['id'], "name": p['name'], "amount": -wager})
+            if not p['is_bot']: gamble_profiles_col.update_one({"user_id": p['id']}, {"$inc": {"net_profit": -wager, "total_wagered": wager, "games_played": 1}}, upsert=True)
+
+    desc += f"{E_ITEMBOX} **House Cut:** {house_cut:,} {currency.upper()}"
+    embed.title = f"{E_CROWN} SLOT PARLOR: FINAL RESULTS"
+    embed.description = desc
+    await interaction.message.edit(embed=embed)
+    
+    gamble_history_col.insert_one({"match_id": match_id, "game": "slots", "currency": currency, "total_pot": pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in players if not p['is_bot']], "results": db_results})
+    await log_casino_receipt(bot, match_id)
+
+
+# --- ROULETTE ENGINE ---
+class RouletteBetView(discord.ui.View):
+    def __init__(self, host, players, wager, currency, pot):
+        super().__init__(timeout=60)
+        self.host, self.players, self.wager, self.currency, self.pot = host, players, wager, currency, pot
+        self.match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
+        self.bets = {} # user_id: color
+
+    async def update_lobby(self, interaction):
+        desc = f"{E_ARROW} The Pot is **{self.pot:,} {self.currency.upper()}**.\n\n**The Table:**\n"
+        humans = [p for p in self.players if not p['is_bot']]
+        all_humans_bet = True
+        
+        for p in humans:
+            if p['id'] in self.bets: desc += f"{E_SUCCESS} **{p['name']}** locked in.\n"
+            else: 
+                desc += f"{E_ACTIVE} **{p['name']}** *(Waiting...)*\n"
+                all_humans_bet = False
+                
+        for p in self.players:
+            if p['is_bot']: desc += f"{E_ITEMBOX} **{p['name']}** *(Waiting for humans...)*\n"
+
+        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
+        embed.set_image(url=GIF_ROULETTE)
+        
+        if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
+        else: await interaction.response.edit_message(embed=embed, view=self)
+
+        if all_humans_bet:
+            self.clear_items()
+            await self.spin_wheel(interaction)
+
+    @discord.ui.button(label="Bet BLACK", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
+    async def btn_black(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.bets[interaction.user.id] = "BLACK"
+        await self.update_lobby(interaction)
+
+    @discord.ui.button(label="Bet RED", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR))
+    async def btn_red(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.bets[interaction.user.id] = "RED"
+        await self.update_lobby(interaction)
+
+    @discord.ui.button(label="Bet GREEN", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ITEMBOX))
+    async def btn_green(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.bets[interaction.user.id] = "GREEN"
+        await self.update_lobby(interaction)
+
+    async def spin_wheel(self, interaction):
+        for p in self.players:
+            if not p['is_bot']: users_col.update_one({"user_id": p['id']}, {"$inc": {self.currency: -self.wager}})
+
+        # Secret 80% Engine (The Opposite Bet)
+        human_reds = list(self.bets.values()).count("RED")
+        human_blacks = list(self.bets.values()).count("BLACK")
+        bot_color = "BLACK" if human_reds >= human_blacks else "RED"
+        
+        for p in self.players:
+            if p['is_bot']: self.bets[p['id']] = bot_color
+
+        # The 5% House Sweep
+        if random.random() < 0.05: winning_color = "GREEN"
+        else: winning_color = bot_color if random.random() < 0.80 else ("RED" if bot_color == "BLACK" else "BLACK")
+        
+        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
+        embed.set_image(url=GIF_ROULETTE)
+        await interaction.message.edit(embed=embed, view=None)
+        await asyncio.sleep(2)
+        
+        embed.description = f"{E_ARROW} The ball is bouncing across the numbers..."
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(2)
+        
+        # Payouts
+        winners = [p for p in self.players if self.bets[p['id']] == winning_color]
+        desc = f"{E_CROWN} The ball has landed in... **{winning_color}**!\n\n"
+        db_results = []
+        
+        if not winners:
+            desc += f"{E_ITEMBOX} **HOUSE SWEEP!** Nobody guessed {winning_color}. The Casino retains **{self.pot:,} {self.currency.upper()}**."
+            for p in self.players:
+                db_results.append({"id": p['id'], "name": p['name'], "amount": -self.wager})
+                if not p['is_bot']: gamble_profiles_col.update_one({"user_id": p['id']}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1}}, upsert=True)
+        else:
+            house_cut = int(self.pot * 0.05)
+            split = (self.pot - house_cut) // len(winners)
+            desc += f"**{E_CROWN} THE WINNERS**\n"
+            for w in winners:
+                desc += f"{E_SUCCESS} **{w['name']}** guessed {winning_color}! Wins **{split:,} {self.currency.upper()}**\n"
+                db_results.append({"id": w['id'], "name": w['name'], "amount": split})
+                if not w['is_bot']:
+                    users_col.update_one({"user_id": w['id']}, {"$inc": {self.currency: split}})
+                    gamble_profiles_col.update_one({"user_id": w['id']}, {"$inc": {"net_profit": split - self.wager, "total_wagered": self.wager, "games_played": 1, "game_stats.roulette.wins": 1}}, upsert=True)
+            
+            desc += f"\n**{E_ERROR} THE LOSERS**\n"
+            for p in self.players:
+                if p not in winners:
+                    desc += f"{E_ERROR} **{p['name']}** guessed {self.bets[p['id']]}. *(Bust)*\n"
+                    db_results.append({"id": p['id'], "name": p['name'], "amount": -self.wager})
+                    if not p['is_bot']: gamble_profiles_col.update_one({"user_id": p['id']}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1}}, upsert=True)
+            
+            desc += f"\n{E_ITEMBOX} **House Cut:** {house_cut:,} {self.currency.upper()}"
+
+        embed.title = f"{E_CROWN} ROULETTE: FINAL RESULTS"
+        embed.description = desc
+        embed.color = 0x2ecc71 if winners else 0xe74c3c
+        await interaction.message.edit(embed=embed)
+        
+        gamble_history_col.insert_one({"match_id": self.match_id, "game": "roulette", "currency": self.currency, "total_pot": self.pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in self.players if not p['is_bot']], "results": db_results})
+        await log_casino_receipt(bot, self.match_id)
+
+# --- MASTER TRANSFORMING LOBBY ---
+class GambleSetupView(discord.ui.View):
+    def __init__(self, host):
+        super().__init__(timeout=180)
+        self.host = host
+        self.game = None
+        self.currency = None
+        self.wager = 0
+        self.players = [{'id': host.id, 'name': host.display_name, 'is_bot': False}]
+        
+        self.game_select = discord.ui.Select(placeholder="Select a Casino Game...", options=[
+            discord.SelectOption(label="High or Low", value="high_low", emoji=discord.PartialEmoji.from_str(E_DICE)),
+            discord.SelectOption(label="Death Roll", value="death_roll", emoji=discord.PartialEmoji.from_str(E_ROLL)),
+            discord.SelectOption(label="Slot Machine", value="slots", emoji=discord.PartialEmoji.from_str(E_SLOTS)),
+            discord.SelectOption(label="Roulette", value="roulette", emoji=discord.PartialEmoji.from_str(E_ROULETTE))
+        ])
+        self.game_select.callback = self.game_callback
+        self.add_item(self.game_select)
+
+    async def game_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
+        self.game = self.game_select.values[0]
+        self.clear_items()
+        
+        curr_select = discord.ui.Select(placeholder="Select Currency...", options=[
+            discord.SelectOption(label="Cash ($)", value="cash", emoji=discord.PartialEmoji.from_str(E_MONEY)),
+            discord.SelectOption(label="Pokecoins (PC)", value="pc", emoji=discord.PartialEmoji.from_str(E_ITEMBOX)),
+            discord.SelectOption(label="Shiny Coins (SC)", value="sc", emoji=discord.PartialEmoji.from_str(E_CROWN))
+        ])
+        curr_select.callback = self.curr_callback
+        self.add_item(curr_select)
+        
+        embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Game selected: **{self.game.replace('_', ' ').title()}**\nWhat are we wagering today?", color=0xe67e22)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def curr_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.host.id: return await interaction.response.send_message(f"{E_ERROR} Not your lobby!", ephemeral=True)
+        self.currency = self.values[0]
+        await self.render_lobby(interaction)
+
+    async def render_lobby(self, interaction):
+        self.clear_items()
+        
+        btn_bots = discord.ui.Button(label="Add Bots", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
+        btn_bots.callback = self.add_bots_callback
+        
+        btn_wager = discord.ui.Button(label="Set Wager & Start", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji.from_str(E_MONEY))
+        btn_wager.callback = self.set_wager_callback
+        
+        self.add_item(btn_bots)
+        self.add_item(btn_wager)
+        
+        p_list = "\n".join([f"{i+1}. {p['name']}" for i, p in enumerate(self.players)])
+        embed = discord.Embed(title=f"{E_CROWN} LOBBY SETUP", description=f"{E_ARROW} Currency Locked: **{self.currency.upper()}**\n\n**Current Lobby:**\n{p_list}", color=0xe67e22)
+        if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
+        else: await interaction.response.edit_message(embed=embed, view=self)
+
+    async def add_bots_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.host.id: return
+        self.players.append({'id': random.randint(1, 99), 'name': f"Ze Bot {len(self.players)}", 'is_bot': True})
+        await self.render_lobby(interaction)
+
+    async def set_wager_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.host.id: return
+        self.wager = 10000 
+        await self.audit_and_confirm(interaction)
+
+    async def audit_and_confirm(self, interaction: discord.Interaction):
+        broke_players = []
+        for p in self.players:
+            if not p['is_bot']:
+                user_data = users_col.find_one({"user_id": p['id']})
+                if not user_data or user_data.get(self.currency, 0) < self.wager:
+                    broke_players.append(p)
+
+        self.clear_items()
+        if broke_players:
+            b_names = ", ".join([p['name'] for p in broke_players])
+            embed = discord.Embed(title=f"{E_ERROR} AUDIT FAILED", description=f"{E_ARROW} {b_names} cannot afford the **{self.wager:,} {self.currency.upper()}** wager.\n\nKick them and play?", color=0xff0000)
+            
+            btn_kick = discord.ui.Button(label="Kick & Play", style=discord.ButtonStyle.success)
+            async def kick_cb(i):
+                self.players = [p for p in self.players if p not in broke_players]
+                await self.audit_and_confirm(i)
+            btn_kick.callback = kick_cb
+            self.add_item(btn_kick)
+            return await interaction.response.edit_message(embed=embed, view=self)
+
+        pot = self.wager * len(self.players)
+        embed = discord.Embed(title=f"{E_ACTIVE} FINAL CONFIRMATION", description=f"**Game:** {self.game.replace('_', ' ').title()}\n**Wager:** {self.wager:,} {self.currency.upper()} each\n**Total Pot:** {pot:,} {self.currency.upper()}", color=0x2ecc71)
+        
+        btn_start = discord.ui.Button(label="Confirm & Start", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
+        async def start_cb(i):
+            if self.game == "high_low":
+                await i.response.edit_message(embed=discord.Embed(title=f"{E_DICE} HIGH OR LOW: THE VOTE", description=f"{E_ARROW} Pot: **{pot:,} {self.currency.upper()}**\nHost {self.host.mention}, what are we playing for?", color=0xe67e22).set_image(url=GIF_DICE), view=HighLowGameView(self.host, self.players, self.wager, self.currency, pot))
+            elif self.game == "death_roll":
+                game_view = DeathRollGameView(self.host, self.players, self.wager, self.currency, pot)
+                await game_view.init_game(i)
+            elif self.game == "slots":
+                await run_slots_game(i, self.host, self.players, self.wager, self.currency, pot)
+            elif self.game == "roulette":
+                game_view = RouletteBetView(self.host, self.players, self.wager, self.currency, pot)
+                await game_view.update_lobby(i)
+        
+        btn_start.callback = start_cb
+        self.add_item(btn_start)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+# --- COMMAND ENTRY POINTS ---
+@bot.command(name="gamble", aliases=["gb"], description="Open the High Roller Lounge.")
+async def gamble_prefix(ctx):
+    embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Welcome to the Casino. Select your game to open a lobby.", color=0xe67e22)
+    await ctx.send(embed=embed, view=GambleSetupView(ctx.author))
+
+@bot.tree.command(name="gamble", description="Open the High Roller Lounge.")
+async def gamble_slash(interaction: discord.Interaction):
+    embed = discord.Embed(title=f"{E_CROWN} THE HIGH ROLLER LOUNGE", description=f"{E_ARROW} Welcome to the Casino. Select your game to open a lobby.", color=0xe67e22)
+    await interaction.response.send_message(embed=embed, view=GambleSetupView(interaction.user))
 
 # ==========================================================
 # PREMIUM PREDICTION SYSTEM
