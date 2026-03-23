@@ -142,10 +142,10 @@ E_GIVEAWAY = "<a:gw:1443251079705001984>"
 E_CHAT = "<a:text:1443251311939293267>"
 CONFIRM_EMOJI = "<a:verified:962942818886770688>"
 DENY_EMOJI = "<a:cross2:972155180185452544>"
-E_DICE = "<a:rollingdice:1345091274226663494>"
-E_ROLL = "<a:highroll:1333787513890017281>"
-E_SLOTS = "<a:777casino:761608156119826492>"
-E_ROULETTE = "<a:roullet:678484862956470292>"
+E_DICE = "<a:rolling_dice:1485554520145662012>"
+E_ROLL = "<a:high_roll:1485553142937550868>"
+E_SLOTS = "<a:777_casino:1485553633784369183>"
+E_ROULETTE = "<a:Roullete_:1485553550049153065>"
 
 
 BATTLE_BANTER = [
@@ -1196,6 +1196,55 @@ async def update_casino_balance(user_id, amount: int, currency: str):
         {"$inc": {currency: amount}}
     )
 
+async def log_casino_receipt(bot, match_id):
+    # 1. Pull the game data from your MongoDB
+    match = gamble_history_col.find_one({"match_id": match_id})
+    if not match: 
+        return
+
+    # 2. Setup the Log Channel (Uses your Global LOG_CHANNEL_ID)
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+        except:
+            print(f"CRITICAL: Could not find Log Channel {LOG_CHANNEL_ID}")
+            return
+
+    # 3. Premium Emoji Mapping for the Log Header
+    log_icons = {
+        "high_low": E_DICE,
+        "death_roll": E_DICE,
+        "slots": E_SLOTS,
+        "roulette": E_ROULETTE
+    }
+    current_icon = log_icons.get(match.get("game"), E_DICE)
+    
+    # 4. Build the Premium Receipt Embed
+    # Uses E_BOOK for the title and E_ARROW for list items
+    desc = f"{current_icon} **Game:** {match['game'].replace('_', ' ').title()}\n"
+    desc += f"{E_MONEY} **Currency:** {match['currency'].upper()}\n"
+    desc += f"{E_ITEMBOX} **Total Pot:** {match['total_pot']:,}\n"
+    desc += f"{E_TIMER} **Time:** <t:{match['timestamp']}:R>\n\n"
+    desc += f"**{E_CROWN} FINAL STANDINGS:**\n"
+
+    for p in match.get("results", []):
+        res_amt = p['amount']
+        # Uses E_SUCCESS for wins and E_ERROR for losses
+        status_emoji = E_SUCCESS if res_amt > 0 else E_ERROR
+        desc += f"{E_ARROW} **{p['name']}**: {status_emoji} **{abs(res_amt):,}**\n"
+
+    embed = discord.Embed(
+        title=f"{E_BOOK} CASINO RECEIPT: #{match_id}", 
+        description=desc, 
+        color=0xf1c40f
+    )
+    
+    # Optional: Add the Match ID to the footer for easy reference
+    embed.set_footer(text=f"Match ID: {match_id}")
+    
+    await channel.send(embed=embed)
+
 # ==========================================================
 # 🎰 THE HIGH ROLLER LOUNGE: LOBBY & HIGH/LOW ENGINE
 # ========================================================== 
@@ -1245,7 +1294,7 @@ class HighLowGameView(discord.ui.View):
         target_str = "HIGH" if target_high else "LOW"
         desc_rolls = ""
         
-        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> HIGH OR LOW: ROLLING PHASE", color=0xe67e22)
+        embed = discord.Embed(title="<a:rolling_dice:1485554520145662012> HIGH OR LOW: ROLLING PHASE", color=0xe67e22)
         embed.set_image(url=GIF_DICE)
         
         # Using interaction.message.edit instead of response.edit_message because we deferred
@@ -1253,7 +1302,7 @@ class HighLowGameView(discord.ui.View):
         
         for res in results:
             # Suspense State
-            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}<a:rollingdice:1345091274226663494> **{res['player']['name']}** is rolling the dice..."
+            embed.description = f"{E_ARROW} Target: **{target_str} NUMBERS WIN**\n\n{desc_rolls}<a:rolling_dice:1485554520145662012> **{res['player']['name']}** is rolling the dice..."
             await interaction.message.edit(embed=embed)
             await asyncio.sleep(2) # 2 Second Suspense
             
@@ -1330,7 +1379,7 @@ class DeathRollGameView(discord.ui.View):
 
     async def render_state(self, interaction):
         current_p = self.players[self.turn_idx]
-        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> THE DEATH ROLL", description=f"{E_ARROW} The Pot: **{self.pot:,} {self.currency.upper()}**\n{E_ARROW} The Target: Roll out of **{self.current_max:,}**\n\n<a:rollingdice:1345091274226663494> **{current_p['name']}**, it is your turn.", color=0xe74c3c)
+        embed = discord.Embed(title="<a:rolling_dice:1485554520145662012> THE DEATH ROLL", description=f"{E_ARROW} The Pot: **{self.pot:,} {self.currency.upper()}**\n{E_ARROW} The Target: Roll out of **{self.current_max:,}**\n\n<a:rolling_dice:1485554520145662012> **{current_p['name']}**, it is your turn.", color=0xe74c3c)
         embed.set_image(url=GIF_DEATHROLL)
         
         if self.current_max <= 5: embed.description = f"{E_ACTIVE} **DANGER ZONE** {E_ACTIVE}\n{embed.description}"
@@ -1363,7 +1412,7 @@ class DeathRollGameView(discord.ui.View):
         else:
             roll = random.randint(1, self.current_max)
 
-        embed = discord.Embed(title="<a:rollingdice:1345091274226663494> THE DEATH ROLL", description=f"{E_SUCCESS} **{player['name']}** rolled a **{roll:,}**!", color=0xe67e22)
+        embed = discord.Embed(title="<a:rolling_dice:1485554520145662012> THE DEATH ROLL", description=f"{E_SUCCESS} **{player['name']}** rolled a **{roll:,}**!", color=0xe67e22)
         embed.set_image(url=GIF_DEATHROLL)
         if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=None)
         else: await interaction.response.edit_message(embed=embed, view=None)
@@ -1439,7 +1488,7 @@ async def run_slots_game(interaction, host, players, wager, currency, pot):
         score = 3 if result == [7,7,7] else 2 if len(set(result)) == 1 else 1 if len(set(result)) == 2 else 0
         player_results.append({"player": p, "reels": result, "score": score})
 
-    embed = discord.Embed(title="<a:777casino:761608156119826492> SLOT PARLOR: LIVE SPINS", color=0xf1c40f)
+    embed = discord.Embed(title="<a:777_casino:1485553633784369183> SLOT PARLOR: LIVE SPINS", color=0xf1c40f)
     embed.set_image(url=GIF_SLOTS)
     
     # Using interaction.message.edit because we deferred
@@ -1450,19 +1499,19 @@ async def run_slots_game(interaction, host, players, wager, currency, pot):
         reels = res['reels']
         name = res['player']['name']
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **<a:777casino:761608156119826492> | <a:777casino:761608156119826492> | <a:777casino:761608156119826492>**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777_casino:1485553633784369183> **<a:777_casino:1485553633784369183> | <a:777_casino:1485553633784369183> | <a:777_casino:1485553633784369183>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | <a:777casino:761608156119826492> | <a:777casino:761608156119826492>**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777_casino:1485553633784369183> **[ {reels[0]} ] | <a:777_casino:1485553633784369183> | <a:777_casino:1485553633784369183>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | [ {reels[1]} ] | <a:777casino:761608156119826492>**"
+        embed.description = f"{E_ARROW} **{name}** pulled the lever!\n\n<a:777_casino:1485553633784369183> **[ {reels[0]} ] | [ {reels[1]} ] | <a:777_casino:1485553633784369183>**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
         
-        embed.description = f"{E_SUCCESS} **{name}** finished spinning:\n\n<a:777casino:761608156119826492> **[ {reels[0]} ] | [ {reels[1]} ] | [ {reels[2]} ]**"
+        embed.description = f"{E_SUCCESS} **{name}** finished spinning:\n\n<a:777_casino:1485553633784369183> **[ {reels[0]} ] | [ {reels[1]} ] | [ {reels[2]} ]**"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(1)
 
@@ -1528,7 +1577,7 @@ class RouletteBetView(discord.ui.View):
         for p in self.players:
             if p['is_bot']: desc += f"{E_ITEMBOX} **{p['name']}** *(Waiting for humans...)*\n"
 
-        embed = discord.Embed(title="<a:roullet:678484862956470292> ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
+        embed = discord.Embed(title="<a:Roullete_:1485553550049153065> ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
         embed.set_image(url=GIF_ROULETTE)
         
         if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
@@ -1577,7 +1626,7 @@ class RouletteBetView(discord.ui.View):
         if random.random() < 0.05: winning_color = "GREEN"
         else: winning_color = bot_color if random.random() < 0.80 else ("RED" if bot_color == "BLACK" else "BLACK")
         
-        embed = discord.Embed(title="<a:roullet:678484862956470292> ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
+        embed = discord.Embed(title="<a:Roullete_:1485553550049153065> ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
         embed.set_image(url=GIF_ROULETTE)
         await interaction.message.edit(embed=embed, view=None)
         await asyncio.sleep(2)
