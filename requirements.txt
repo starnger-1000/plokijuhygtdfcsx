@@ -9,5 +9,5 @@ jinja2
 dnspython
 certifi
 chat-exporter
-google-generativeai
+groq
 ddgs
