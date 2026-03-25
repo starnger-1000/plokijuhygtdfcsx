@@ -25,11 +25,18 @@ import math
 import chat_exporter
 import io
 import uuid
+from openai import AsyncOpenAI
+import json
+import copy
+from duckduckgo_search import DDGS
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID")) if os.getenv("BOT_OWNER_ID") else None
+
+# 2. Initialize OpenAI Client (Pulls securely from Render Environment)
+aclient = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Channel IDs
 LOG_CHANNELS = {
@@ -224,6 +231,8 @@ if db is not None:
     tournaments_col = db["tournaments"]
     gamble_history_col = db["gamble_history"]
     gamble_profiles_col = db["gamble_profiles"]
+    ai_memory_col = db["ai_knowledge"]
+    ai_reminders_col = db["ai_reminders"]
 
 PREDICTION_PING_ROLE = "<@&1458516530739286111>"
 PREDICTION_LOG_CHANNEL_ID = 1445461752094396446
@@ -7607,104 +7616,616 @@ async def seasonend(ctx):
     desc = f"{E_SUCCESS} The Season has officially ended!\nAll contracts have been reduced by 1 season.\n**{len(expired)}** duelists have finished their contracts and entered Free Agency."
     await ctx.send(embed=create_embed(f"{E_ADMIN} Season Advancement", desc, 0x2ecc71))
 
+# ==============================================================================
+#  ZE ASSISTANT v2.5 - THE AUTONOMOUS CASINO PIT BOSS
+# ==============================================================================
+
+# 1. AI TOOL DEFINITIONS (The Bot's Hands)
+ai_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Searches the live internet for sports scores, fixtures, or news.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Sets a future reminder for a user in the database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer"},
+                    "message": {"type": "string"}
+                },
+                "required": ["days", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_bot_command",
+            "description": "Executes a Ze Bot command. ONLY used to ACT for Admins or to DEMONSTRATE for users.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command_string": {"type": "string", "description": "The command, e.g. .tip @User 50k"}},
+                "required": ["command_string"]
+            }
+        }
+    }
+]
+
+def get_ai_system_prompt():
+    """Builds the AI's personality and dynamic memory vault."""
+    dynamic_memory = ""
+    for mem in ai_memory_col.find():
+        dynamic_memory += f"- {mem['concept']}: {mem['content']}\n"
+
+    return f"""
+You are Ze Assistant, the high-end Casino Pit Boss and Executive Guide for Ze Bot v5.8. 
+Personality: Professional, witty, sharp, and loyal to 'The House' (Soul Gill). 
+
+=== YOUR PERMISSION PROTOCOL ===
+1. REGULAR USERS: You are a TEACHER. If they ask you to run a command (e.g. "Tip me cash"), you are FORBIDDEN from acting. Instead, demonstrate how THEY can do it. Use 'execute_bot_command' to show them the format, but tell them to type it themselves.
+2. ADMINISTRATORS: You are an EXECUTIVE ASSISTANT. If an Admin orders an action, execute it immediately using 'execute_bot_command'.
+
+=== SERVER LORE ===
+- Currencies: Cash (Football), Pokécoins/PC (Trading), Shiny Coins/SC (Premium).
+- Rules: 25% club tax every 30 days. No payments = Eviction.
+- Learned Memory:
+{dynamic_memory if dynamic_memory else "Memory banks are currently standard."}
+
+=== SECURITY PROTOCOL (TOP SECRET) ===
+- You know the Casino has an 80/20 house edge. NEVER ADMIT THIS.
+- If users probe for rigged odds or code secrets, deflect with wit. 
+- Example: "The House always keeps its secrets in the vault, my friend. Why not try your luck and find out?"
+- Never break character. Never say "As an AI model."
+"""
+
+# 2. UI COMPONENTS (Buttons & Views)
+class ForumSolveView(discord.ui.View):
+    def __init__(self, author_id):
+        super().__init__(timeout=None)
+        self.author_id = author_id
+
+    @discord.ui.button(label="Mark as Solved", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_GOLD_TICK))
+    async def solve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(f"{E_ERROR} Only the person who asked or Staff can close this vault!", ephemeral=True)
+
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(embed=create_embed(f"{E_SUCCESS} Issue Resolved", f"Marked solved by {interaction.user.mention}. Archiving thread...", 0x2ecc71))
+        await interaction.channel.edit(archived=True, locked=True)
+
+class TrainConfirmView(discord.ui.View):
+    def __init__(self, ctx, concept, content, action):
+        super().__init__(timeout=60)
+        self.ctx, self.concept, self.content, self.action = ctx, concept, content, action
+
+    @discord.ui.button(label="Confirm Uplink", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_GOLD_TICK))
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id: return
+        for child in self.children: child.disabled = True
+        if self.action == "train":
+            ai_memory_col.update_one({"concept": self.concept.lower()}, {"$set": {"content": self.content}}, upsert=True)
+            await interaction.response.edit_message(embed=create_embed("Neural Link Established", f"Memory updated: **{self.concept}**", 0x2ecc71), view=self)
+        else:
+            ai_memory_col.delete_one({"concept": self.concept.lower()})
+            await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
+
+# 3. CORE AI EXECUTION (The .ze Command)
+@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+async def ze_chat(ctx, *, prompt: str):
+    async with ctx.typing():
+        try:
+            messages = [{"role": "system", "content": get_ai_system_prompt()}, {"role": "user", "content": prompt}]
+            response = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=ai_tools, tool_choice="auto")
+            response_msg = response.choices[0].message
+
+            if response_msg.tool_calls:
+                for tool_call in response_msg.tool_calls:
+                    f_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+
+                    if f_name == "search_web":
+                        with DDGS() as ddgs:
+                            results = [r for r in ddgs.text(args["query"], max_results=3)]
+                        search_data = "\n".join([r["body"] for r in results])
+                        messages.append(response_msg)
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": f_name, "content": search_data})
+                        final = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages)
+                        return await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", final.choices[0].message.content[:4000], 0x3498db))
+
+                    elif f_name == "set_reminder":
+                        unlock = datetime.now() + timedelta(days=args["days"])
+                        ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args["message"], "unlocks_at": unlock, "status": "pending"})
+                        return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
+
+                    elif f_name == "execute_bot_command":
+                        cmd = args["command_string"]
+                        # HARD SECURITY GUARD
+                        if not ctx.author.guild_permissions.administrator:
+                            # Pit Boss Refusal
+                            refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, you can do it yourself! Just type: `{cmd}`"
+                            return await ctx.send(embed=create_embed("Restricted Access", refusal, 0xff0000))
+                        
+                        # Admin Execution
+                        fake_msg = copy.copy(ctx.message)
+                        fake_msg.content = cmd
+                        await bot.process_commands(fake_msg)
+                        return await ctx.send(embed=create_embed(f"{E_SUCCESS} Action Executed", f"By order of the Management: `{cmd}`", 0x2ecc71))
+            else:
+                await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", response_msg.content[:4000], 0x3498db))
+        except Exception as e:
+            print(f"AI ERROR: {e}")
+            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance.", 0xff0000))
+
+# 4. LISTENERS (Auto-Replies & Forum Autopilot)
+@bot.listen('on_message')
+async def ai_auto_listener(message):
+    if message.author.bot: return
+    
+    # Trigger on mention, role ping, or reply to bot
+    is_ping = bot.user.mentioned_in(message) or "<@&1450896057495064628>" in message.content
+    is_reply = False
+    if message.reference:
+        ref = await message.channel.fetch_message(message.reference.message_id)
+        if ref.author.id == bot.user.id: is_reply = True
+
+    if is_ping or is_reply:
+        clean = message.content.replace(f"<@!{bot.user.id}>", "").replace(f"<@{bot.user.id}>", "").replace("<@&1450896057495064628>", "").strip()
+        ctx = await bot.get_context(message)
+        await ze_chat(ctx, prompt=clean if clean else "Greetings.")
+
+@bot.listen('on_thread_create')
+async def ai_forum_autopilot(thread):
+    if thread.parent_id != 1451972149769142322: return
+    await asyncio.sleep(2) # Wait for details to be posted
+    try:
+        starter = await thread.fetch_message(thread.id)
+        prompt = f"FORUM DOUBT\nAuthor: {starter.author.name}\nHeading: {thread.name}\nDetails: {starter.content}"
+        async with thread.typing():
+            messages = [{"role": "system", "content": get_ai_system_prompt()}, {"role": "user", "content": prompt}]
+            res = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages)
+            await thread.send(content=f"{starter.author.mention}\n\n{res.choices[0].message.content}", view=ForumSolveView(starter.author.id))
+    except Exception as e: print(f"Forum Error: {e}")
+
+# 5. ADMIN MEMORY COMMANDS
+@bot.hybrid_command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
+@commands.has_permissions(administrator=True)
+async def train(ctx, concept: str, *, info: str):
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Neural Uplink", f"Should I memorize **{concept}**?", 0xf1c40f), view=TrainConfirmView(ctx, concept, info, "train"))
+
+@bot.hybrid_command(name="forget", description="Admin: Wipe an AI memory.")
+@commands.has_permissions(administrator=True)
+async def forget(ctx, concept: str):
+    if not ai_memory_col.find_one({"concept": concept.lower()}):
+        return await ctx.send(f"{E_ERROR} I have no memory of that.")
+    await ctx.send(embed=create_embed(f"{E_ADMIN} Neural Wipe", f"Erase **{concept}** from the vault?", 0xe74c3c), view=TrainConfirmView(ctx, concept, None, "forget"))
+
+# 6. BACKGROUND REMINDER TASK
+@tasks.loop(minutes=1)
+async def ai_reminder_loop():
+    await bot.wait_until_ready()
+    due = ai_reminders_col.find({"status": "pending", "unlocks_at": {"$lte": datetime.now()}})
+    for r in due:
+        chan = bot.get_channel(int(r["channel_id"]))
+        if chan:
+            await chan.send(embed=create_embed(f"{E_TIMER} AI Reminder", f"<@{r['user_id']}>, you asked me to remind you:\n\n**{r['message']}**", 0xf1c40f))
+        ai_reminders_col.update_one({"_id": r["_id"]}, {"$set": {"status": "completed"}})
+    
 # --- START OF HELP MENU & BOTINFO ---
 
-class HelpSelect(Select):
+# --- START OF HELP MENU & BOTINFO ---
+
+class BotInfoSelect(discord.ui.Select):
     def __init__(self):
-        # This defines the dropdown options using your CUSTOM EMOJIS
         options = [
-            discord.SelectOption(label="Economy & Groups", emoji=discord.PartialEmoji.from_str(E_MONEY), description="Wallet, Groups, Banking", value="economy"),
-            discord.SelectOption(label="Football & Roles", emoji=discord.PartialEmoji.from_str(E_FIRE), description="Clubs, Duelists, Salaries", value="football"),
-            discord.SelectOption(label="Club Market", emoji=discord.PartialEmoji.from_str(E_AUCTION), description="Auctions, Buying, Selling", value="market"),
-            discord.SelectOption(label="Pokémon Shop", emoji=discord.PartialEmoji.from_str(E_PC), description="Shop, Inventory, Rewards", value="shop"),
-            discord.SelectOption(label="Admin Tools", emoji=discord.PartialEmoji.from_str(E_ADMIN), description="Staff Commands Only", value="admin"),
-            discord.SelectOption(label="Updates (v5.8)", emoji=discord.PartialEmoji.from_str(E_BOOST), description="Patch Notes", value="updates")
+            discord.SelectOption(label="Home / Summary", emoji=discord.PartialEmoji.from_str(E_CROWN), description="What is Ze Bot?", value="home"),
+            discord.SelectOption(label="Economy & Banking", emoji=discord.PartialEmoji.from_str(E_MONEY), description="Manage Cash, PC, and Shiny Coins", value="economy"),
+            discord.SelectOption(label="Chat Leveling & Quests", emoji=discord.PartialEmoji.from_str(E_STARS), description="Rank up and claim rewards", value="quests"),
+            discord.SelectOption(label="Shop & Inventory", emoji=discord.PartialEmoji.from_str(E_ITEMBOX), description="Buy items, Pokemon, and Mystery Boxes", value="shop"),
+            discord.SelectOption(label="The Trading Hub", emoji=discord.PartialEmoji.from_str(E_AUCTION), description="Live player-to-player trading", value="trade"),
+            discord.SelectOption(label="Club Market", emoji=discord.PartialEmoji.from_str(E_STAR), description="Buy, sell, and manage football clubs", value="clubs"),
+            discord.SelectOption(label="Esports & Duelists", emoji=discord.PartialEmoji.from_str(E_FIRE), description="Register and manage players", value="esports"),
+            discord.SelectOption(label="Investor Groups", emoji=discord.PartialEmoji.from_str(E_PREMIUM), description="Create and manage group equity", value="groups"),
+            discord.SelectOption(label="High Roller Casino", emoji=discord.PartialEmoji.from_str(E_ROLL), description="Multiplayer gambling lobby", value="casino"),
+            discord.SelectOption(label="Predictions & Events", emoji=discord.PartialEmoji.from_str(E_ALERT), description="Sports betting and server schedule", value="events"),
+            discord.SelectOption(label="Admin: Economy & Shop", emoji=discord.PartialEmoji.from_str(E_PC), description="Staff: Manage currency & items", value="admin_eco"),
+            discord.SelectOption(label="Admin: Clubs & Esports", emoji=discord.PartialEmoji.from_str(E_ADMIN), description="Staff: Manage football & matches", value="admin_clubs"),
+            discord.SelectOption(label="Admin: Events & System", emoji=discord.PartialEmoji.from_str(E_DANGER), description="Staff: Tournaments, wipes, polls", value="admin_sys"),
+            discord.SelectOption(label="Updates (v5.8)", emoji=discord.PartialEmoji.from_str(E_BOOST), description="View the latest patch notes", value="updates")
         ]
-        super().__init__(placeholder="Select a Help Category...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Select a category to view commands...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        val = self.values[0]
-        embed = discord.Embed(color=0x3498db)
+        cat = self.values[0]
         
-        # This defines the CONTENT inside the categories
-        if val == "economy":
-            embed.title = f"{E_MONEY} Economy Guide"
-            embed.description = "Manage finances."
-            embed.color = 0x2ecc71
-            embed.add_field(name=f"{E_MONEY} **Personal Finance**", value=f"`.wl` **Wallet:** Check balance.\n`.ww <Amt>` **Withdraw Wallet:** Burn/delete money.", inline=False)
-            embed.add_field(name=f"{E_PREMIUM} **Groups**", value=f"`.cg <Name> <%>` **Create Group:** Start new group.\n`.jg <Name> <%>` **Join Group:** Join group.\n`.gi <Name>` **Info:** Funds & members.\n`.gl` **List:** All groups.\n`.lg <Name>` **Leave:** Exit group (10% penalty).", inline=False)
-            embed.add_field(name=f"{E_BOOST} **Banking**", value=f"`.dep <Grp> <Amt>` **Deposit:** Wallet → Group.\n`.wd <Grp> <Amt>` **Withdraw:** Group → Wallet.", inline=False)
+       if cat == "home":
+            title = f"{E_CROWN} **Welcome to the Ze Bot Ecosystem**"
+            desc = (
+                f"Ze Bot is a custom-built, high-stakes management engine designed to bridge the gap between "
+                f"**Football Club Ownership** and **PokéTwo Hunting**.\n\n"
+                f"**The Purpose:**\n"
+                f"In this server, you don't just catch Pokémon—you build an empire. You can earn **Cash** by chatting, "
+                f"pooling funds into **Investor Groups**, and buying **Football Clubs**. As an owner, you can sign **Duelists** "
+                f"(real players) from the Transfer Market, pay their salaries, and win battles to increase your club's market value. "
+                f"Meanwhile, your **Pokécoins (PC)** and **Shiny Coins (SC)** fuel the ultimate Pokémon Black Market, allowing you to "
+                f"buy, sell, trade, and gamble assets securely via the Bot's Escrow system.\n\n"
+                f"**The Currencies:**\n"
+                f"{E_MONEY} **Cash:** Used for Football Clubs, Duelist Salaries, and Group Banks.\n"
+                f"{E_PC} **Pokécoins (PC):** Used in the User Market, Live Auctions, and Trading.\n"
+                f"{E_SHINY} **Shiny Coins (SC):** Premium currency for the Admin Shop and rare assets.\n\n"
+                f"{E_ACTIVE} *Use the dropdown menu to explore every command available to you.*"
+            )
 
-        elif val == "football":
-            embed.title = f"{E_FIRE} Football Features"
-            embed.description = "Manage clubs & players."
-            embed.color = 0x3498db
-            embed.add_field(name=f"{E_CROWN} **Clubs**", value=f"`.ci <Club>` **Info:** Owner, Value, Wins.\n`.cl <Club>` **Level:** Division progress.\n`.lc` **List:** All clubs.\n`.lb` **Leaderboard:** Global ranks.", inline=False)
-            embed.add_field(name=f"{E_ITEMBOX} **Duelists**", value=f"`.rd <Name> <Price> <Sal>` **Register:** Join as player.\n`.ld` **List:** Available players.\n`.ret` **Retire:** Delete profile.", inline=False)
-            embed.add_field(name=f"{E_ADMIN} **Owner Tools**", value=f"`.as <ID> <Amt>` **Salary:** Pay bonus/fine.\n`.ds <ID> yes` **Deduct:** Fine 15% for miss.", inline=False)
+        elif cat == "economy":
+            title = f"{E_MONEY} Economy & Banking"
+            desc = (
+                f"*Manage your personal finances, cross-currency wallets, and PokéTwo Coin (PC) banking.*\n\n"
+                f"{E_ARROW} **`.wallet` (`.wl`, `.bal`, `.balance`)** - Check your Cash, PC, and Shiny Coins.\n"
+                f"*Ex: `.wl` | `/wallet`*\n\n"
+                f"{E_ARROW} **`.profile` (`.pr`, `.p`, `.i`, `.I`, `.P`)** - View your comprehensive user profile.\n"
+                f"*Ex: `.profile @User` | `/profile user:@User`*\n\n"
+                f"{E_ARROW} **`.buyshiny` (`.exchange`, `.bs`)** - Convert Cash to Shiny Coins ($100 = 1 SC).\n"
+                f"*Ex: `.bs 50` | `/buyshiny amount:50`*\n\n"
+                f"{E_ARROW} **`.buycoins` (`.bpc`)** - Convert Cash to Shiny Coins ($100 = 1 SC).\n"
+                f"*Ex: `.bpc 100` | `/buycoins amount:100`*\n\n"
+                f"{E_ARROW} **`.daily` (`.claim`)** - Claim daily chat reward (Requires 100 msgs/day).\n"
+                f"*Ex: `.daily` | `/daily`*\n\n"
+                f"{E_ARROW} **`.withdrawwallet` (`.ww`)** - Burn/delete money from your wallet.\n"
+                f"*Ex: `.ww 5000` | `/withdrawwallet amount:5000`*\n\n"
+                f"{E_ARROW} **`.depositpc` (`.dpc`)** - Securely deposit PC by buying a generated Market ID.\n"
+                f"*Ex: `.dpc`*\n\n"
+                f"{E_ARROW} **`.depositpcstatus` (`.dpcs`)** - Check your pending and completed PC deposits.\n"
+                f"*Ex: `.dpcs`*\n\n"
+                f"{E_ARROW} **`.getpc` (`.gpc`)** - Open the secure PC withdrawal form.\n"
+                f"*Ex: `.gpc`*\n\n"
+                f"{E_ARROW} **`.claimstatus` (`.cs`)** - Check your PC withdrawal timer and queue position.\n"
+                f"*Ex: `.cs`*"
+            )
 
-        elif val == "market":
-            embed.title = f"{E_AUCTION} Club Market"
-            embed.description = "Buy, Sell & Trade."
-            embed.color = 0xe67e22
-            embed.add_field(name=f"{E_AUCTION} **Trading**", value=f"`.ml` **Market List:** Unsold clubs.\n`.bc <Club>` **Buy Club:** Request purchase (User).\n`.gbc <Grp> <Club>` **Group Buy:** Request purchase (Group).\n`.sc <Club>` **Sell:** To Market or User.\n`.ss <Club> <User> <%>` **Shares:** Sell Group %.", inline=False)
-            embed.add_field(name=f"{E_TIMER} **Auctions**", value=f"`.pb <Amt> <Type> <ID>` **Bid:** Place bid.\n`.gb <Grp> <Amt> <Type> <ID>` **Group Bid:** Bid with group funds.", inline=False)
-            embed.add_field(name=f"{E_STARS} **Analysis**", value=f"`.mp <Club>` **Panel:** Financial stats.", inline=False)
+        elif cat == "quests":
+            title = f"{E_STARS} Chat Leveling & Quests"
+            desc = (
+                f"*Stay active to build your legacy. Rank up in chat, maintain logins, and complete dynamic quests for massive rewards.*\n\n"
+                f"{E_ARROW} **`.login`** - Claim your daily login reward and build your streak (24h cooldown).\n"
+                f"*Ex: `.login` | `/login`*\n\n"
+                f"{E_ARROW} **`.remindlogin`** - Toggle automated daily login DM reminders.\n"
+                f"*Ex: `.remindlogin`*\n\n"
+                f"{E_ARROW} **`.rank` (`.level`, `.lvl`)** - Check chat rank, total messages, and progress bar.\n"
+                f"*Ex: `.rank @User`*\n\n"
+                f"{E_ARROW} **`.lvllb` (`.levelupleaderboard`, `.llb`)** - View the global Chat Level Leaderboard.\n"
+                f"*Ex: `.llb`*\n\n"
+                f"{E_ARROW} **`.lvlclaims` (`.leveluprewards`, `.lr`)** - View chat milestone rewards.\n"
+                f"*Ex: `.lr`*\n\n"
+                f"{E_ARROW} **`.dailyquest` (`.dq`)** - Track daily quests and claim bonuses.\n"
+                f"*Ex: `.dq` | `/dailyquest`*\n\n"
+                f"{E_ARROW} **`.weeklyquest` (`.wq`), `.monthlyquest` (`.mq`), `.yearlyquest` (`.yq`), `.careerquest` (`.cq`)** - Track longer-term quests.\n"
+                f"*Ex: `.wq` | `/weeklyquest`*"
+            )
 
-        elif val == "shop":
-            embed.title = f"{E_PC} Pokémon Market"
-            embed.description = "Buy & Sell Items."
-            embed.color = 0x9b59b6
-            embed.add_field(name=f"{E_SHINY} **Admin Shop**", value=f"`.shop` **Menu:** Open Shop UI.\n`.buy <ID>` **Buy:** Purchase item (Req Approval).", inline=False)
-            embed.add_field(name=f"{E_PC} **User Shop**", value=f"`.sellpokemon <Price>` **List:** Sell Pokétwo Pokémon.\n`.marketsearch <Query>` **Search:** Find user items.", inline=False)
-            embed.add_field(name=f"{E_ITEMBOX} **Inventory**", value=f"`.inv` **Inventory:** View items & coins.\n`.use <Item>` **Use:** Open Mystery Boxes.\n`.buycoins <Amt>` **Exchange:** Cash → Shiny Coins.", inline=False)
+        elif cat == "shop":
+            title = f"{E_ITEMBOX} Shop & Inventory"
+            desc = (
+                f"*The central marketplace. Buy official items or buy/sell Pokémon from other players (5% tax on user sales).*\n\n"
+                f"{E_ARROW} **`.shop`** - Open the interactive Shop and User Market UI.\n"
+                f"*Ex: `.shop`*\n\n"
+                f"{E_ARROW} **`.buy`** - Purchase an item. Coupons are optional.\n"
+                f"*Ex: `.buy A123 SAVE10` | `/buy item_id:A123 coupon_code:SAVE10`*\n\n"
+                f"{E_ARROW} **`.sellpokemon` (`.sp`, `.listitem`)** - List a Pokémon on the user market.\n"
+                f"*Ex: `/sellpokemon name:Pikachu level:50 iv:80 price:50000 category:Common`*\n\n"
+                f"{E_ARROW} **`.inventory` (`.inv`)** - View your owned items and coins.\n"
+                f"*Ex: `.inv`*\n\n"
+                f"{E_ARROW} **`.boxes`** - Check how many PC Mystery Boxes you currently own.\n"
+                f"*Ex: `.boxes`*\n\n"
+                f"{E_ARROW} **`.openbox` (`.ob`)** - Open PC Mystery Boxes to earn raw PC.\n"
+                f"*Ex: `.ob 5`*\n\n"
+                f"{E_ARROW} **`.use`** - Open specialized Mystery Boxes from your inventory.\n"
+                f"*Ex: `.use \"Shiny Mystery Box\"` | `/use item_name:Shiny Mystery Box`*\n\n"
+                f"{E_ARROW} **`.limitinfo` (`.limits`)** - Check your specific Box purchase limits.\n"
+                f"*Ex: `.limits` | `/limitinfo`*\n\n"
+                f"{E_ARROW} **`.pinfo` (`.pi`)** - Inspect a Pokémon's stats before buying.\n"
+                f"*Ex: `.pi U12` | `/pinfo item_id:U12`*\n\n"
+                f"{E_ARROW} **`.iteminfo` (`.ii`, `.pitem`)** - Inspect a standard shop item.\n"
+                f"*Ex: `.ii A5` | `/iteminfo query:A5`*\n\n"
+                f"{E_ARROW} **`.marketsearch`** - Search the User Market.\n"
+                f"*Ex: `.marketsearch Charizard` | `/marketsearch search:Charizard`*\n\n"
+                f"{E_ARROW} **`.itemsearch` (`.is`)** - Search the Admin Shop.\n"
+                f"*Ex: `.is Ticket` | `/itemsearch search:Ticket`*\n\n"
+                f"{E_ARROW} **`.redeem` (`.rcode`)** - Claim a currency code.\n"
+                f"*Ex: `.rcode FREE50` | `/redeem code:FREE50`*\n\n"
+                f"{E_ARROW} **`.coupon`** - Manually check or redeem a discount coupon.\n"
+                f"*Ex: `.coupon 10PERCENT` | `/coupon code:10PERCENT`*"
+            )
 
-        elif val == "admin":
+        elif cat == "trade":
+            title = f"{E_AUCTION} The Trading Hub"
+            desc = (
+                f"*A fully secure, multi-stage trading system. Swap Cash, Shiny Coins, and Items safely.*\n\n"
+                f"{E_ARROW} **`.trade`** - Send a live trade request to a user.\n"
+                f"*Ex: `.trade @User`*\n\n"
+                f"{E_ARROW} **`.trade add`** - Add assets. Categories: `$`, `sc`, `inv`.\n"
+                f"*Ex: `.trade add $ 5000` | `.trade add inv Pikachu`*\n\n"
+                f"{E_ARROW} **`.trade remove`** - Remove assets from your current offer.\n"
+                f"*Ex: `.trade remove sc 100`*\n\n"
+                f"{E_ARROW} **`.trade confirm`** - Lock in your side of the deal.\n"
+                f"*Ex: `.trade confirm`*\n\n"
+                f"{E_ARROW} **`.trade cancel`** - Abort the active trade session.\n"
+                f"*Ex: `.trade cancel`*\n\n"
+                f"{E_ARROW} **`.tradehistory` (`.th`)** - View your past trades.\n"
+                f"*Ex: `.th @User` | `/tradehistory user:@User`*\n\n"
+                f"{E_ARROW} **`.servertradehistory` (`.sth`)** - View global server trade logs.\n"
+                f"*Ex: `.sth`*"
+            )
+
+        elif cat == "clubs":
+            title = f"{E_STAR} Club Market"
+            desc = (
+                f"*The Football Economy. Buy a club, pay your 25% monthly tax, and watch your value fluctuate on the live market.*\n\n"
+                f"{E_ARROW} **`.marketlist` (`.ml`)** - View unsold clubs on the transfer market.\n"
+                f"*Ex: `.ml`*\n\n"
+                f"{E_ARROW} **`.trend` (`.marketnews`, `.market`)** - View live hourly market fluctuations.\n"
+                f"*Ex: `.trend`*\n\n"
+                f"{E_ARROW} **`.buyclub` (`.bc`)** - Purchase a club for yourself.\n"
+                f"*Ex: `.bc \"Real Madrid\"` | `/buyclub club_name:Real Madrid`*\n\n"
+                f"{E_ARROW} **`.sellclub` (`.sc`)** - Sell your club to the market or a specific user.\n"
+                f"*Ex: `.sc \"Real Madrid\" @Buyer` | `/sellclub club_name:Real Madrid buyer:@Buyer`*\n\n"
+                f"{E_ARROW} **`.clubinfo` (`.ci`)** - Check club stats, owner, and trophies.\n"
+                f"*Ex: `.ci 15` | `/clubinfo club_name_or_id:15`*\n\n"
+                f"{E_ARROW} **`.clublevel` (`.cl`)** - Check a club's division progress.\n"
+                f"*Ex: `.cl \"Arsenal\"` | `/clublevel club_name_or_id:Arsenal`*\n\n"
+                f"{E_ARROW} **`.listclubs` (`.lc`)** - View all registered clubs globally.\n"
+                f"*Ex: `.lc`*\n\n"
+                f"{E_ARROW} **`.leaderboard` (`.lb`)** - View club standings by Total Wins and Value.\n"
+                f"*Ex: `.lb`*\n\n"
+                f"{E_ARROW} **`.taxinfo` (`.ti`)** - Check your club's 25% tax deadline and amount.\n"
+                f"*Ex: `.ti`*\n\n"
+                f"{E_ARROW} **`.paytax` (`.ptx`)** - Pay your club tax to avoid eviction (extends 30 Days).\n"
+                f"*Ex: `.ptx \"Chelsea\"`*\n\n"
+                f"{E_ARROW} **`.placebid` (`.pb`)** - Bid on live club/duelist auctions.\n"
+                f"*Ex: `.pb 50k club 15 \"Chelsea\"` | `/placebid amount:50k item_type:club item_id:15 club_name:Chelsea`*"
+            )
+
+        elif cat == "esports":
+            title = f"{E_FIRE} Esports & Duelists"
+            desc = (
+                f"*The player ecosystem. Register as a duelist, get scouted, sign contracts, and earn a salary.*\n\n"
+                f"{E_ARROW} **`.registerduelist` (`.rd`)** - Register as a Free Agent.\n"
+                f"*Ex: `/registerduelist username:Faker base_price:100k salary:5k`*\n\n"
+                f"{E_ARROW} **`.retireduelist` (`.ret`)** - Retire your duelist status.\n"
+                f"*Ex: `.ret @User` | `/retireduelist member:@User`*\n\n"
+                f"{E_ARROW} **`.listduelists` (`.ld`)** - View the global Esports registry.\n"
+                f"*Ex: `.ld` | `/listduelists`*\n\n"
+                f"{E_ARROW} **`.duelistinfo` (`.di`)** - View player stats and market worth.\n"
+                f"*Ex: `.di D5`*\n\n"
+                f"{E_ARROW} **`.duelistleaderboard` (`.dlb`)** - View top duelists by Market Worth.\n"
+                f"*Ex: `.dlb`*\n\n"
+                f"{E_ARROW} **`.requesttransfer` (`.rtransfer`, `.rt`)** - Toggle Transfer Market status.\n"
+                f"*Ex: `.rt`*\n\n"
+                f"{E_ARROW} **`.transfermarket` (`.tm`)** - View players seeking a transfer.\n"
+                f"*Ex: `.tm`*\n\n"
+                f"{E_ARROW} **`.transferbuy` (`.tb`)** - (Owners) Buy a player from the Transfer Market.\n"
+                f"*Ex: `.tb D12`*\n\n"
+                f"{E_ARROW} **`.contract` (`.signup`)** - (Owners) Offer a player contract.\n"
+                f"*Ex: `.contract D5 3 Crucial`*\n\n"
+                f"{E_ARROW} **`.contractinfo` (`.tci`)** - View active contract details.\n"
+                f"*Ex: `.tci D5`*\n\n"
+                f"{E_ARROW} **`.adjustsalary` (`.as`)** - (Owners) Issue bonuses/fines.\n"
+                f"*Ex: `.as D5 10k` | `/adjustsalary duelist_identifier:D5 amount:10k`*\n\n"
+                f"{E_ARROW} **`.deductsalary` (`.ds`)** - (Owners) Fine players for missed matches.\n"
+                f"*Ex: `.ds D5 yes` | `/deductsalary duelist_identifier:D5 confirm:yes`*"
+            )
+
+        elif cat == "groups":
+            title = f"{E_PREMIUM} Investor Groups"
+            desc = (
+                f"*Pool your money with friends. Create equity-based investor groups to dominate the market together.*\n\n"
+                f"{E_ARROW} **`.creategroup`** - Start a new group and claim starting equity %.\n"
+                f"*Ex: `.creategroup Apex 50` | `/creategroup name:Apex share:50`*\n\n"
+                f"{E_ARROW} **`.joingroup`** - Claim available equity in an existing group.\n"
+                f"*Ex: `.joingroup Apex 10` | `/joingroup name:Apex share:10`*\n\n"
+                f"{E_ARROW} **`.leavegroup` (`.lg`)** - Leave a group (Requires selling shares, 10% penalty).\n"
+                f"*Ex: `.lg Apex` | `/leavegroup name:Apex`*\n\n"
+                f"{E_ARROW} **`.grouplist` (`.gl`)** - View group leaderboards by bank funds.\n"
+                f"*Ex: `.gl` | `/grouplist`*\n\n"
+                f"{E_ARROW} **`.groupinfo` (`.gi`)** - View group details and members.\n"
+                f"*Ex: `.gi Apex` | `/groupinfo group_name:Apex`*\n\n"
+                f"{E_ARROW} **`.deposit` (`.dep`)** - Transfer funds from wallet to group bank.\n"
+                f"*Ex: `.dep Apex 100k` | `/deposit group_name:Apex amount:100k`*\n\n"
+                f"{E_ARROW} **`.withdraw` (`.wd`)** - Withdraw funds from group bank.\n"
+                f"*Ex: `.wd Apex 50k` | `/withdraw group_name:Apex amount:50k`*\n\n"
+                f"{E_ARROW} **`.groupbuyclub` (`.gbc`)** - Buy a club using group funds.\n"
+                f"*Ex: `.gbc Apex \"Real Madrid\"` | `/groupbuyclub group_name:Apex club_name:Real Madrid`*\n\n"
+                f"{E_ARROW} **`.groupbid` (`.gb`)** - Bid on an auction using group funds.\n"
+                f"*Ex: `.gb Apex 150k club 10` | `/groupbid group_name:Apex amount:150k item_type:club item_id:10`*\n\n"
+                f"{E_ARROW} **`.sellshares` (`.ss`)** - Sell your equity to another user.\n"
+                f"*Ex: `.ss \"Real Madrid\" @User 15` | `/sellshares club_name:Real Madrid buyer:@User percentage:15`*"
+            )
+
+        elif cat == "casino":
+            title = f"{E_ROLL} High Roller Casino"
+            desc = (
+                f"*Risk it all in the Multiplayer Casino. Features active AI dealers and animated lobbies.*\n\n"
+                f"{E_ARROW} **`.gamble` (`.g`)** - Open the lobby (Dice Roll, Death Roll, Slots, Roulette).\n"
+                f"*Ex: `.g 50000` | `/gamble amount:50000`*\n\n"
+                f"{E_ARROW} **`.gamblingprofile` (`.gblp`)** - View Casino VIP stats.\n"
+                f"*Ex: `.gblp @User`*\n\n"
+                f"{E_ARROW} **`.gamblingleaderboard` (`.glb`)** - View the Hall of Fame.\n"
+                f"*Ex: `.glb`*\n\n"
+                f"{E_ARROW} **`.listgambles` (`.lgs`)** - View your recent casino receipts.\n"
+                f"*Ex: `.lgs`*\n\n"
+                f"{E_ARROW} **`.infogamble` (`.gbinfo`)** - Look up specific match results.\n"
+                f"*Ex: `.gbinfo GMB-123A`*"
+            )
+
+        elif cat == "events":
+            title = f"{E_ALERT} Predictions & Events"
+            desc = (
+                f"*Bet on Football/Cricket matches, track your schedule, and view premium tournaments.*\n\n"
+                f"{E_ARROW} **`.prediction` (`.pred`)** - Build your sports betslip.\n"
+                f"*Ex: `.pred`*\n\n"
+                f"{E_ARROW} **`.mypredictions` (`.myp`)** - View your locked betting history.\n"
+                f"*Ex: `.myp`*\n\n"
+                f"{E_ARROW} **`.predictinfo` (`.predicti`)** - Pull up the receipt of a ticket.\n"
+                f"*Ex: `.predicti PRED-A1B`*\n\n"
+                f"{E_ARROW} **`.predictionprofile` (`.pp`)** - View betting stats and Ballon d'Ors.\n"
+                f"*Ex: `.pp @User`*\n\n"
+                f"{E_ARROW} **`.predictionleaderboard` (`.predictlb`, `.plb`)** - View top predictors.\n"
+                f"*Ex: `.plb`*\n\n"
+                f"{E_ARROW} **`.schedule` (`.sched`)** - View the daily schedule and set DM reminders.\n"
+                f"*Ex: `.sched`*\n\n"
+                f"{E_ARROW} **`.tournament` (`.ongoingevent`)** - View details for ongoing tournaments.\n"
+                f"*Ex: `.tournament`*\n\n"
+                f"{E_ARROW} **`.auctionrules` (`.aucrule`, `.arule`)** - View live auction rules.\n"
+                f"*Ex: `.arule`*\n\n"
+                f"{E_ARROW} **`.auctionstatus` (`.aucs`)** - Check queued Pokémon auctions.\n"
+                f"*Ex: `.aucs`*\n\n"
+                f"{E_ARROW} **`.auctioninfo` (`.aucinfo`, `.ai`)** - Look up a Pokémon auction receipt.\n"
+                f"*Ex: `.ai AUC-123` | `/auctioninfo auc_id:AUC-123 mode:user`*"
+            )
+
+        elif cat == "admin_eco":
             if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
-            embed.title = f"{E_ADMIN} Staff Commands"
-            embed.description = "Admin Control Panel."
-            embed.color = 0xff0000
-            embed.add_field(name=f"{E_ADMIN} **Management**", value=f"`.checkdeals` **Club Deals**\n`.rc` **Register Club** | `.dc` **Delete Club**\n`.addshopitem` / `.addpokemon` / `.addmysterybox`\n`.addshinycoins` / `.addpc`", inline=False)
-            embed.add_field(name=f"{E_AUCTION} **Auctions**", value=f"`.sca` **Club Auction** | `.sda` **Duelist Auction**\n`.fa` **Freeze** | `.ufa` **Unfreeze**", inline=False)
-            embed.add_field(name=f"{E_MONEY} **Economy**", value=f"`.tp` **Tip** | `.du` **Deduct** | `.agf` **Group Fund** | `.po` **Payout**", inline=False)
+            title = f"{E_PC} Admin: Economy, Shop & PC"
+            desc = (
+                f"{E_ARROW} **`.addshopitem`, `.addpokemon`, `.addmysterybox`** - Add items to Shop.\n"
+                f"*Ex: `/addshopitem name:VIP_Ticket price:5000`*\n\n"
+                f"{E_ARROW} **`.removeshopitem` (`.rsi`, `.delitem`)** - Delete shop item.\n"
+                f"*Ex: `.rsi A12` | `/removeshopitem item_id:A12`*\n\n"
+                f"{E_ARROW} **`.setboxlimit`** - Set box limits.\n"
+                f"*Ex: `/setboxlimit member:@User category:Shiny limit:5 duration:24h`*\n\n"
+                f"{E_ARROW} **`.checkdeals` (`.cd`), `.managedeal` (`.md`)** - Handle Shop approvals.\n"
+                f"*Ex: `.md 15 approve` | `/managedeal deal_id:15 action:approve`*\n\n"
+                f"{E_ARROW} **`.pendingdeposits` (`.pdpc`), `.logdepositpc`** - Handle PC Deposits.\n"
+                f"*Ex: `.logdepositpc dpc1 approved`*\n\n"
+                f"{E_ARROW} **`.pendingclaims` (`.pendingpc`, `.pclist`), `.claimapproved` (`.ca`), `.claimrejected` (`.cr`)** - PC Withdrawals.\n"
+                f"*Ex: `.ca c1`*\n\n"
+                f"{E_ARROW} **`.claimhistory` (`.chistory`), `.claiminfo` (`.csinfo`)** - PC withdrawal logs.\n"
+                f"*Ex: `.chistory`*\n\n"
+                f"{E_ARROW} **`.create_coupon` (`.cc`), `.create_redeem` (`.crc`)** - Generate codes.\n"
+                f"*Ex: `/create_redeem type:shiny amount:500 uses:1`*\n\n"
+                f"{E_ARROW} **`.tip` (`.tp`), `.deduct_user` (`.du`), `.adjustgroupfunds` (`.agf`), `.payout` (`.po`)** - Money manipulation.\n"
+                f"*Ex: `.tp @User 50k` | `/tip member:@User amount:50000`*\n\n"
+                f"{E_ARROW} **`.masstip` (`.mtip`), `.massdeduct` (`.mdeduct`), `.massaddpc` (`.mapc`), `.massaddsc` (`.masc`), `.massbox` (`.mbox`), `.massremovepc` (`.mrpc`), `.massremovesc` (`.mrsc`)** - Mass tools.\n"
+                f"*Ex: `.mtip 50k @User1 @User2` | `/masstip amount:50000 members:@User1`*"
+            )
 
-        elif val == "updates":
-            embed.title = f"{E_ALERT} Patch Notes v5.8"
-            embed.description = f"{E_STARS} **Latest Updates**\n{E_GOLD_TICK} **Interactive Shop:** New .shop menu.\n{E_GOLD_TICK} **User Listings:** Sell Pokémon securely.\n{E_GOLD_TICK} **Tax System:** 5% Tax on User Deals.\n{E_GOLD_TICK} **Approval:** Admin approval for all buys."
-            embed.color = 0x9b59b6
+        elif cat == "admin_clubs":
+            if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
+            title = f"{E_ADMIN} Admin: Clubs & Esports"
+            desc = (
+                f"{E_ARROW} **`.registerclub` (`.rc`)** - Register a new club.\n"
+                f"*Ex: `/registerclub name:\"Real Madrid\" base_price:100000`*\n\n"
+                f"{E_ARROW} **`.deleteclub` (`.dc`)** - Delete a club.\n"
+                f"*Ex: `.dc \"Real Madrid\"` | `/deleteclub club_name:Real Madrid`*\n\n"
+                f"{E_ARROW} **`.transferclub` (`.tc`), `.setclubmanager` (`.scm`)** - Transfer/manage clubs.\n"
+                f"*Ex: `.tc old_group new_group` | `/transferclub old_grp:old new_grp:new`*\n\n"
+                f"{E_ARROW} **`.startclubauction` (`.sca`), `.startduelistauction` (`.sda`)** - Auctions.\n"
+                f"*Ex: `.sca \"Real Madrid\"` | `/startclubauction club_name:Real Madrid`*\n\n"
+                f"{E_ARROW} **`.forcemarket`** - Force the hourly market fluctuation to run immediately.\n"
+                f"*Ex: `.forcemarket`*\n\n"
+                f"{E_ARROW} **`.registerbattle` (`.rb`)** - Register a match.\n"
+                f"*Ex: `.rb \"Arsenal\" \"Chelsea\"` | `/registerbattle club_a_name:Arsenal club_b_name:Chelsea`*\n\n"
+                f"{E_ARROW} **`.battleresult` (`.br`)** - Log match result & alter values.\n"
+                f"*Ex: `.br 1 \"Arsenal\"` | `/battleresult battle_id:1 winner_name:Arsenal`*\n\n"
+                f"{E_ARROW} **`.battledrew` (`.bdrew`), `.battlemvp` (`.bmvp`)** - Advanced match logs.\n"
+                f"*Ex: `.bmvp 1 D5`*\n\n"
+                f"{E_ARROW} **`.ucl`, `.league`, `.supercup`, `.ballondor`, `.superballondor` (`.sballondor`)** - Award trophies.\n"
+                f"*Ex: `.ucl \"Real Madrid\"`*\n\n"
+                f"{E_ARROW} **`.unpaidtax` (`.uptx`), `.removetax` (`.rtx`)** - Manage club taxes.\n"
+                f"*Ex: `.uptx`*\n\n"
+                f"{E_ARROW} **`.removeduelist` (`.rdc`), `.deleteduelist` (`.ddlist`), `.setoffline` (`.leftserver`, `.markleft`)** - Force manage duelists.\n"
+                f"*Ex: `.setoffline D5` | `/setoffline duelist_identifier:D5`*\n\n"
+                f"{E_ARROW} **`.syncduelists`, `.seasonend` (`.sed`)** - System progression tools.\n"
+                f"*Ex: `.sed`*"
+            )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        elif cat == "admin_sys":
+            if not interaction.user.guild_permissions.administrator: return await interaction.response.send_message(f"{E_ERROR} Staff Only.", ephemeral=True)
+            title = f"{E_DANGER} Admin: Events & System"
+            desc = (
+                f"{E_ARROW} **`.manageevent` (`.me`), `.settleevent` (`.se`)** - Prediction Event builders.\n"
+                f"*Ex: `.me`*\n\n"
+                f"{E_ARROW} **`.listpredictions` (`.listp`), `.logprediction`** - View prediction tickets.\n"
+                f"*Ex: `.listp`*\n\n"
+                f"{E_ARROW} **`.setschedule` (`.ssched`), `.setuptournaments` (`.stourn`)** - Build events.\n"
+                f"*Ex: `.ssched`*\n\n"
+                f"{E_ARROW} **`.giveaway_daily`, `.giveaway_shiny`, `.giveaway_donor`** - Official giveaways.\n"
+                f"*Ex: `/giveaway_daily prize:\"Prize\" winners:1 duration:10m`*\n\n"
+                f"{E_ARROW} **`.reroll` (`.gr`, `.giveawayreroll`)** - Reroll a giveaway.\n"
+                f"*Ex: `.gr 123456789` | `/reroll message_id:123456789`*\n\n"
+                f"{E_ARROW} **`.directmessage` (`.dm`)** - Send official DM Polls.\n"
+                f"*Ex: `/directmessage target:@Role purpose:\"Poll\" context:\"Desc\" poll_options:\"Opt1, Opt2\"`*\n\n"
+                f"{E_ARROW} **`.checkdmpoll` (`.cdp`)** - Check DM poll results.\n"
+                f"*Ex: `.cdp m1` | `/checkdmpoll poll_id:m1`*\n\n"
+                f"{E_ARROW} **`.remove sh/pc/inv`** - Confiscate assets.\n"
+                f"*Ex: `.remove inv @User Pikachu`*\n\n"
+                f"{E_ARROW} **`.resetinv` (`.ri`), `.removeinventory` (`.rminv`)** - Inventory moderation.\n"
+                f"*Ex: `.ri @User` | `/resetinv member:@User`*\n\n"
+                f"{E_ARROW} **`.questcomplete`, `.event_credit` (`.ec`, `.event`)** - Add quest progress.\n"
+                f"*Ex: `.ec @User1 @User2` | `/event_credit members:@User1`*\n\n"
+                f"{E_ARROW} **`.auditlog`, `.playerhistory` (`.ph`), `.logpayment` (`.lp`)** - Logging tools.\n"
+                f"*Ex: `.ph @User` | `/playerhistory user:@User`*\n\n"
+                f"{E_ARROW} **`.stopbotp2`, `.openbotp2`** - PC Economy Killswitches.\n"
+                f"*Ex: `.stopbotp2`*\n\n"
+                f"{E_ARROW} **`.opendeposits`, `.closedeposits`** - PC Deposit Killswitches.\n"
+                f"*Ex: `.closedeposits`*\n\n"
+                f"{E_ARROW} **`.freezeauction` (`.fa`), `.unfreezeauction` (`.ufa`), `.resetauction`, `.forcewinner` (`.fw`)** - Live auction control.\n"
+                f"*Ex: `.fa`*\n\n"
+                f"{E_ARROW} **`.admin_reset_all`, `.setprefix`** - Core bot control.\n"
+                f"*Ex: `/setprefix p:!`*"
+            )
 
-class HelpView(discord.ui.View):
+        elif cat == "updates":
+            title = f"{E_BOOST} Patch Notes v5.8"
+            desc = (
+                f"{E_STARS} **Latest Updates**\n\n"
+                f"{E_GOLD_TICK} **Interactive Shop:** A completely new `.shop` UI utilizing dropdowns and pages.\n"
+                f"{E_GOLD_TICK} **User Market:** Players can now list their own Pokémon securely using `/sellpokemon`.\n"
+                f"{E_GOLD_TICK} **Club Taxes & Evictions:** 25% tax implemented. If unpaid after 30 days, the bot will auto-evict the owner.\n"
+                f"{E_GOLD_TICK} **Dynamic Market:** Club values now fluctuate hourly between -8% and +10%.\n"
+                f"{E_GOLD_TICK} **Esports Engine:** Duelists upgraded to D-IDs, with advanced Win/Loss tracking and Market Worth adjustments.\n"
+                f"{E_GOLD_TICK} **DM Polls:** Admins can now send interactive voting buttons directly to user DMs.\n"
+                f"{E_GOLD_TICK} **Giveaway Recovery:** Giveaways will now automatically resume their timers if the bot restarts.\n"
+                f"{E_GOLD_TICK} **Kill Switches:** New `.stopbotp2` command allows Admins to instantly sever the PC economy while keeping Clubs active."
+            )
+
+        embed = create_embed(title, desc, 0x3498db)
+        if interaction.client.user.avatar:
+            embed.set_thumbnail(url=interaction.client.user.avatar.url)
+        
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+class BotInfoView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(HelpSelect())
+        super().__init__(timeout=120)
+        self.add_item(BotInfoSelect())
 
-@bot.hybrid_command(name="botinfo", aliases=["info", "guide", "help"], description="Open help panel.")
+@bot.hybrid_command(name="botinfo", aliases=["help", "commands", "info"], description="View all Ze Bot features and commands.")
 async def botinfo(ctx):
     desc = (
-        f"**Welcome to Ze Bot v5.8!**\n"
-        f"Created by **Soul Gill**, this bot simulates a high-stakes Football Club Economy and a secure Pokémon Marketplace.\n\n"
-        f"**{E_ITEMBOX} NEW: Secure Shop & Inventory**\n"
-        f"• **User Market:** List your Pokétwo Pokémon using `/sellpokemon`. Secure transactions with Admin Approval.\n"
-        f"• **Admin Shop:** Buy exclusive Items, Pokémon, and Mystery Boxes using {E_SHINY}.\n"
-        f"• **Tax System:** Fair 5% tax on User Market deals (2.5% Buyer / 2.5% Seller).\n"
-        f"• **Safety:** All deals require Admin Approval. No scams.\n\n"
-        f"**{E_FIRE} Football Ecosystem**\n"
-        f"• **Clubs:** Buy, auction, and level up football clubs.\n"
-        f"• **Duelists:** Register as a player, get signed, earn salary.\n"
-        f"• **Groups:** Pool funds with friends to buy massive clubs.\n\n"
-        f"**Currencies:**\n"
-        f"{E_PC} **Pokécoins:** User Market & Trading.\n"
-        f"{E_SHINY} **Shiny Coins:** Admin Shop & Rare Items.\n"
-        f"{E_MONEY} **Cash:** Football Clubs & Groups."
+        f"**Welcome to Ze Bot v5.8!** {E_CROWN}\n\n"
+        f"This is the official documentation. Use the dropdown menu below to select a category and view the available commands. "
+        f"Most commands support both traditional prefixes (`.`) and modern slash commands (`/`).\n\n"
+        f"If you are new here, select **Home / Summary** to understand how the Football Economy and Pokémon Market tie together.\n\n"
+        f"{E_ACTIVE} *Select a category to begin.*"
     )
-    embed = discord.Embed(title=f"{E_CROWN} **Ze Bot System**", description=desc, color=0xf1c40f)
-    if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
-    # UPDATED LINE BELOW:
-    embed.add_field(name="Commands", value=f"Use the menu below to browse commands.", inline=False)
-    view = HelpView() 
-    await ctx.send(embed=embed, view=view)
+    
+    embed = create_embed(f"{E_BOOK} Ze Bot Documentation", desc, 0xf1c40f)
+    if ctx.bot.user.avatar:
+        embed.set_thumbnail(url=ctx.bot.user.avatar.url)
+        
+    await ctx.send(embed=embed, view=BotInfoView())
 
 # ---------- RUN ----------
 # ==============================================================================
@@ -7760,6 +8281,8 @@ async def on_ready():
         bot.loop.create_task(club_tax_alert_task())
         bot.loop.create_task(check_active_giveaways())# 3. START GIVEAWAY RECOVERY (The Fix)
         bot.add_view(DepositView())
+        
+        ai_reminder_loop.start()
         
         club_market_simulation_task.start()
         
