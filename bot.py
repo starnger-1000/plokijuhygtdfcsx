@@ -25,7 +25,8 @@ import math
 import chat_exporter
 import io
 import uuid
-from openai import AsyncOpenAI
+import copy
+import google.generativeai as genai
 import json
 import copy
 from duckduckgo_search import DDGS
@@ -35,8 +36,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID")) if os.getenv("BOT_OWNER_ID") else None
 
-# 2. Initialize OpenAI Client (Pulls securely from Render Environment)
-aclient = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Configure the Gemini API automatically pulling from Render
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Channel IDs
 LOG_CHANNELS = {
@@ -7620,48 +7621,20 @@ async def seasonend(ctx):
 #  ZE ASSISTANT v2.5 - THE AUTONOMOUS CASINO PIT BOSS
 # ==============================================================================
 
-# 1. AI TOOL DEFINITIONS (The Bot's Hands)
-ai_tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Searches the live internet for sports scores, fixtures, or news.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_reminder",
-            "description": "Sets a future reminder for a user in the database.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "days": {"type": "integer"},
-                    "message": {"type": "string"}
-                },
-                "required": ["days", "message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_bot_command",
-            "description": "Executes a Ze Bot command. ONLY used to ACT for Admins or to DEMONSTRATE for users.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command_string": {"type": "string", "description": "The command, e.g. .tip @User 50k"}},
-                "required": ["command_string"]
-            }
-        }
-    }
-]
+# 1. AI TOOL DEFINITIONS (Gemini magically reads these Python functions!)
+def search_web(query: str):
+    """Searches the live internet for sports scores, match fixtures, or current news."""
+    pass
+
+def set_reminder(days: int, message: str):
+    """Sets a future reminder for a user in the database."""
+    pass
+
+def execute_bot_command(command_string: str):
+    """Executes a Ze Bot command. ONLY used to ACT for Admins or to DEMONSTRATE for users."""
+    pass
+
+ai_tools = [search_web, set_reminder, execute_bot_command]
 
 def get_ai_system_prompt():
     """Builds the AI's personality and dynamic memory vault."""
@@ -7722,59 +7695,71 @@ class TrainConfirmView(discord.ui.View):
             ai_memory_col.delete_one({"concept": self.concept.lower()})
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
-# 3. CORE AI EXECUTION (The .ze Command)
-@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+# 3. CORE AI EXECUTION (The .ze Command using Gemini)
+@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try:
-            messages = [{"role": "system", "content": get_ai_system_prompt()}, {"role": "user", "content": prompt}]
-            response = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=ai_tools, tool_choice="auto")
-            response_msg = response.choices[0].message
+            # We initialize the model fresh each time so it pulls the latest DB memory
+            model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                system_instruction=get_ai_system_prompt(),
+                tools=ai_tools
+            )
+            
+            chat = model.start_chat()
+            response = await chat.send_message_async(prompt)
 
-            if response_msg.tool_calls:
-                for tool_call in response_msg.tool_calls:
-                    f_name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
+            # Check if Gemini decided to use one of our tools
+            if response.function_call:
+                fc = response.function_call
+                f_name = fc.name
+                args = {k: v for k, v in fc.args.items()} # Convert Gemini args to standard dictionary
 
-                    if f_name == "search_web":
-                        with DDGS() as ddgs:
-                            results = [r for r in ddgs.text(args["query"], max_results=3)]
-                        search_data = "\n".join([r["body"] for r in results])
-                        messages.append(response_msg)
-                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": f_name, "content": search_data})
-                        final = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages)
-                        return await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", final.choices[0].message.content[:4000], 0x3498db))
+                if f_name == "search_web":
+                    with DDGS() as ddgs:
+                        results = [r for r in ddgs.text(args["query"], max_results=3)]
+                    search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
+                    
+                    # Send the web results back to Gemini so it can format an answer
+                    final_response = await chat.send_message_async(
+                        genai.types.Part.from_function_response(
+                            name="search_web",
+                            response={"result": search_data}
+                        )
+                    )
+                    return await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", final_response.text[:4000], 0x3498db))
 
-                    elif f_name == "set_reminder":
-                        unlock = datetime.now() + timedelta(days=args["days"])
-                        ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args["message"], "unlocks_at": unlock, "status": "pending"})
-                        return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
+                elif f_name == "set_reminder":
+                    unlock = datetime.now() + timedelta(days=int(args["days"]))
+                    ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args["message"], "unlocks_at": unlock, "status": "pending"})
+                    return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
 
-                    elif f_name == "execute_bot_command":
-                        cmd = args["command_string"]
-                        # HARD SECURITY GUARD
-                        if not ctx.author.guild_permissions.administrator:
-                            # Pit Boss Refusal
-                            refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, you can do it yourself! Just type: `{cmd}`"
-                            return await ctx.send(embed=create_embed("Restricted Access", refusal, 0xff0000))
-                        
-                        # Admin Execution
-                        fake_msg = copy.copy(ctx.message)
-                        fake_msg.content = cmd
-                        await bot.process_commands(fake_msg)
-                        return await ctx.send(embed=create_embed(f"{E_SUCCESS} Action Executed", f"By order of the Management: `{cmd}`", 0x2ecc71))
+                elif f_name == "execute_bot_command":
+                    cmd = args["command_string"]
+                    # HARD SECURITY GUARD
+                    if not ctx.author.guild_permissions.administrator:
+                        refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, you can do it yourself! Just type: `{cmd}`"
+                        return await ctx.send(embed=create_embed("Restricted Access", refusal, 0xff0000))
+                    
+                    # Admin Execution
+                    fake_msg = copy.copy(ctx.message)
+                    fake_msg.content = cmd
+                    await bot.process_commands(fake_msg)
+                    return await ctx.send(embed=create_embed(f"{E_SUCCESS} Action Executed", f"By order of the Management: `{cmd}`", 0x2ecc71))
             else:
-                await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", response_msg.content[:4000], 0x3498db))
+                # Normal Text Response
+                await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", response.text[:4000], 0x3498db))
+
         except Exception as e:
             print(f"AI ERROR: {e}")
-            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance.", 0xff0000))
+            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance. Check Render logs.", 0xff0000))
 
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
 async def ai_auto_listener(message):
     if message.author.bot: return
     
-    # Trigger on mention, role ping, or reply to bot
     is_ping = bot.user.mentioned_in(message) or "<@&1450896057495064628>" in message.content
     is_reply = False
     if message.reference:
@@ -7789,23 +7774,23 @@ async def ai_auto_listener(message):
 @bot.listen('on_thread_create')
 async def ai_forum_autopilot(thread):
     if thread.parent_id != 1451972149769142322: return
-    await asyncio.sleep(2) # Wait for details to be posted
+    await asyncio.sleep(2)
     try:
         starter = await thread.fetch_message(thread.id)
         prompt = f"FORUM DOUBT\nAuthor: {starter.author.name}\nHeading: {thread.name}\nDetails: {starter.content}"
         async with thread.typing():
-            messages = [{"role": "system", "content": get_ai_system_prompt()}, {"role": "user", "content": prompt}]
-            res = await aclient.chat.completions.create(model="gpt-4o-mini", messages=messages)
-            await thread.send(content=f"{starter.author.mention}\n\n{res.choices[0].message.content}", view=ForumSolveView(starter.author.id))
+            model = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=get_ai_system_prompt())
+            res = await model.generate_content_async(prompt)
+            await thread.send(content=f"{starter.author.mention}\n\n{res.text}", view=ForumSolveView(starter.author.id))
     except Exception as e: print(f"Forum Error: {e}")
 
 # 5. ADMIN MEMORY COMMANDS
-@bot.command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
+@bot.hybrid_command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
 @commands.has_permissions(administrator=True)
 async def train(ctx, concept: str, *, info: str):
     await ctx.send(embed=create_embed(f"{E_ADMIN} Neural Uplink", f"Should I memorize **{concept}**?", 0xf1c40f), view=TrainConfirmView(ctx, concept, info, "train"))
 
-@bot.command(name="forget", description="Admin: Wipe an AI memory.")
+@bot.hybrid_command(name="forget", description="Admin: Wipe an AI memory.")
 @commands.has_permissions(administrator=True)
 async def forget(ctx, concept: str):
     if not ai_memory_col.find_one({"concept": concept.lower()}):
