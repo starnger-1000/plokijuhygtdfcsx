@@ -7729,7 +7729,7 @@ async def ze_chat(ctx, *, prompt: str):
                 for key in fc.args:
                     args[key] = fc.args[key]
 
-                elif f_name == "search_web":
+                if f_name == "search_web":
                     with DDGS() as ddgs:
                         results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
