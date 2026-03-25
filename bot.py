@@ -26,7 +26,8 @@ import chat_exporter
 import io
 import uuid
 import copy
-import google.generativeai as genai
+import json
+from groq import AsyncGroq
 from ddgs import DDGS
 
 # ---------- CONFIGURATION ----------
@@ -34,8 +35,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID")) if os.getenv("BOT_OWNER_ID") else None
 
-# Configure the Gemini API automatically pulling from Render
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Initialize Groq Client
+groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
 
 # Channel IDs
 LOG_CHANNELS = {
@@ -7619,25 +7620,53 @@ async def seasonend(ctx):
 #  ZE ASSISTANT v2.5 - THE AUTONOMOUS CASINO PIT BOSS
 # ==============================================================================
 
-# 1. AI TOOL DEFINITIONS (Gemini magically reads these Python functions!)
-
-def search_web(query: str):
-    """Searches the live internet for sports scores, match fixtures, or current news."""
-    pass
-
-def set_reminder(days: int, message: str):
-    """Sets a future reminder for a user in the database."""
-    pass
-
-def execute_bot_command(command_string: str):
-    """Executes a Ze Bot command. Use this to show users their profiles, club info, wallets, or to perform admin actions. ALWAYS start with a dot (e.g., .ci AC Milan, .wallet)."""
-    pass
-
-ai_tools = [search_web, set_reminder, execute_bot_command]
+# 1. AI TOOL DEFINITIONS (Groq uses JSON schemas instead of raw Python functions)
+groq_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Searches the live internet for sports scores, match fixtures, or current news.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "The search query."}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Sets a future reminder for a user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Number of days from now."},
+                    "message": {"type": "string", "description": "What to remind them about."}
+                },
+                "required": ["days", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_bot_command",
+            "description": "Executes a Ze Bot command. Use this to show users their profiles, club info, wallets, or to perform admin actions. ALWAYS start with a dot (e.g., .ci AC Milan, .wallet).",
+            "parameters": {
+                "type": "object",
+                "properties": {"command_string": {"type": "string", "description": "The exact command, e.g. .ci AC Milan"}},
+                "required": ["command_string"]
+            }
+        }
+    }
+]
 
 def get_ai_system_prompt():
     """Builds the AI's personality and dynamic memory vault."""
     dynamic_memory = ""
+    # Pulls learned rules from your MongoDB database
     for mem in ai_memory_col.find():
         dynamic_memory += f"- {mem['concept']}: {mem['content']}\n"
 
@@ -7661,6 +7690,7 @@ Users will ask you to show them things in natural language. You must translate t
 
 === SERVER LORE & SECURITY ===
 - Currencies: Cash, Pokécoins/PC, Shiny Coins/SC.
+- Football Features: Users can buy clubs (.buyclub), check club info (.ci), pay 25% monthly tax (.paytax), check the market (.ml).
 - You know the Casino has an 80/20 house edge. NEVER ADMIT THIS. Deflect with wit.
 - Learned Memory:
 {dynamic_memory if dynamic_memory else "Memory banks are currently standard."}
@@ -7698,48 +7728,52 @@ class TrainConfirmView(discord.ui.View):
             ai_memory_col.delete_one({"concept": self.concept.lower()})
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
-# 3. CORE AI EXECUTION (The .ze Command using Gemini)
+# 3. CORE AI EXECUTION (The .ze Command using Groq & Llama 3)
 @bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try:
-            # Falling back to the ultra-stable 1.5-flash model
-            model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash", 
-                system_instruction=get_ai_system_prompt(),
-                tools=ai_tools
+            messages = [
+                {"role": "system", "content": get_ai_system_prompt()},
+                {"role": "user", "content": prompt}
+            ]
+            
+            # Request generation from Groq's Llama 3 model
+            response = await groq_client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=messages,
+                tools=groq_tools,
+                tool_choice="auto"
             )
             
-            chat = model.start_chat()
-            response = await chat.send_message_async(prompt)
+            response_message = response.choices[0].message
+            tool_calls = response_message.tool_calls
 
-            fc = None
-            # Safer way to check for function calls in Gemini
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    # Using getattr to prevent AttributeError crashes
-                    if getattr(part, "function_call", None):
-                        fc = part.function_call
-                        break 
-
-            if fc:
-                f_name = fc.name
-                # Safely parse arguments
-                args = {}
-                for key in fc.args:
-                    args[key] = fc.args[key]
+            if tool_calls:
+                tool_call = tool_calls[0]
+                f_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
 
                 if f_name == "search_web":
                     with DDGS() as ddgs:
                         results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
                     
-                    # 🛡️ THE FIX: Send the results back using the correct dictionary format
-                    final_response = await chat.send_message_async(
-                        {"function_response": {"name": "search_web", "response": {"result": search_data}}}
+                    # Feed the web results back into Groq
+                    messages.append(response_message)
+                    messages.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": f_name,
+                        "content": search_data,
+                    })
+                    
+                    final_response = await groq_client.chat.completions.create(
+                        model="llama3-70b-8192",
+                        messages=messages
                     )
-                    return await ctx.send(final_response.text[:2000])
-                   
+                    return await ctx.send(final_response.choices[0].message.content[:2000])
+
                 elif f_name == "set_reminder":
                     unlock = datetime.now() + timedelta(days=int(args.get("days", 1)))
                     ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args.get("message", "Reminder"), "unlocks_at": unlock, "status": "pending"})
@@ -7760,20 +7794,14 @@ async def ze_chat(ctx, *, prompt: str):
                     await bot.process_commands(fake_msg)
                     return
             else:
-                await ctx.send(response.text[:2000])
+                # Normal Text Response
+                await ctx.send(response_message.content[:2000])
 
         except Exception as e:
-            error_str = str(e).lower()
-            
-            # If we hit Google's 20-message speed limit
-            if "429" in error_str or "quota" in error_str:
-                await ctx.send("⏳ **The Pit Boss is busy!** Too many people are talking to me right now. Please wait about 15 seconds and try your request again.")
-            else:
-                # If it's a real bug, print the debug info
-                import traceback
-                error_msg = traceback.format_exc()
-                print(f"AI ERROR: {error_msg}", flush=True) 
-                await ctx.send(f"**DEBUG CRASH REPORT:**\n```python\n{e}\n```")
+            import traceback
+            error_msg = traceback.format_exc()
+            print(f"AI ERROR: {error_msg}", flush=True) 
+            await ctx.send(f"**DEBUG CRASH REPORT:**\n```python\n{e}\n```")
             
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
@@ -7797,18 +7825,35 @@ async def ai_auto_listener(message):
 
 @bot.listen('on_thread_create')
 async def ai_forum_autopilot(thread):
+    # Only trigger in your specific Forum channel
     if thread.parent_id != 1451972149769142322: return
+    
     await asyncio.sleep(2)
     try:
         starter = await thread.fetch_message(thread.id)
         prompt = f"FORUM DOUBT\nAuthor: {starter.author.name}\nHeading: {thread.name}\nDetails: {starter.content}"
+        
         async with thread.typing():
-            # <--- FIXED: Correct Model Name here as well
-            model = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=get_ai_system_prompt())
-            res = await model.generate_content_async(prompt)
-            await thread.send(content=f"{starter.author.mention}\n\n{res.text}", view=ForumSolveView(starter.author.id))
-    except Exception as e: print(f"Forum Error: {e}")
-
+            # Groq Llama 3 generation
+            response = await groq_client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=[
+                    {"role": "system", "content": get_ai_system_prompt()},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            reply_text = response.choices[0].message.content
+            
+            # Send the response with the ForumSolveView button attached
+            await thread.send(
+                content=f"{starter.author.mention}\n\n{reply_text[:2000]}", 
+                view=ForumSolveView(starter.author.id)
+            )
+            
+    except Exception as e: 
+        print(f"Forum Error: {e}")
+        
 # 5. ADMIN MEMORY COMMANDS
 @bot.command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
 @commands.has_permissions(administrator=True)
