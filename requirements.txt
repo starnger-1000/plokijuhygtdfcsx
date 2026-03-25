@@ -9,3 +9,5 @@ jinja2
 dnspython
 certifi
 chat-exporter
+openai
+duckduckgo-search
