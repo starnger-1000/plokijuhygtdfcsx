@@ -7723,7 +7723,7 @@ class TrainConfirmView(discord.ui.View):
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
 # 3. CORE AI EXECUTION (The .ze Command)
-@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try:
@@ -7800,12 +7800,12 @@ async def ai_forum_autopilot(thread):
     except Exception as e: print(f"Forum Error: {e}")
 
 # 5. ADMIN MEMORY COMMANDS
-@bot.hybrid_command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
+@bot.command(name="train", description="Admin: Teach the Pit Boss a permanent rule.")
 @commands.has_permissions(administrator=True)
 async def train(ctx, concept: str, *, info: str):
     await ctx.send(embed=create_embed(f"{E_ADMIN} Neural Uplink", f"Should I memorize **{concept}**?", 0xf1c40f), view=TrainConfirmView(ctx, concept, info, "train"))
 
-@bot.hybrid_command(name="forget", description="Admin: Wipe an AI memory.")
+@bot.command(name="forget", description="Admin: Wipe an AI memory.")
 @commands.has_permissions(administrator=True)
 async def forget(ctx, concept: str):
     if not ai_memory_col.find_one({"concept": concept.lower()}):
