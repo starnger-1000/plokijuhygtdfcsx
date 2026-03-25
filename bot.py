@@ -7699,12 +7699,13 @@ class TrainConfirmView(discord.ui.View):
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
 # 3. CORE AI EXECUTION (The .ze Command using Gemini)
-@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
-        try: # <--- The try block starts here
+        try:
+            # Falling back to the ultra-stable 1.5-flash model
             model = genai.GenerativeModel(
-                model_name="gemini-2.0-flash",
+                model_name="gemini-1.5-flash", 
                 system_instruction=get_ai_system_prompt(),
                 tools=ai_tools
             )
@@ -7713,15 +7714,20 @@ async def ze_chat(ctx, *, prompt: str):
             response = await chat.send_message_async(prompt)
 
             fc = None
+            # Safer way to check for function calls in Gemini
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    if part.function_call and part.function_call.name:
+                    # Using getattr to prevent AttributeError crashes
+                    if getattr(part, "function_call", None):
                         fc = part.function_call
                         break 
 
             if fc:
                 f_name = fc.name
-                args = {k: v for k, v in fc.args.items()} 
+                # Safely parse arguments
+                args = {}
+                for key in fc.args:
+                    args[key] = fc.args[key]
 
                 if f_name == "search_web":
                     with DDGS() as ddgs:
@@ -7743,10 +7749,7 @@ async def ze_chat(ctx, *, prompt: str):
 
                 elif f_name == "execute_bot_command":
                     cmd = args.get("command_string", "").strip()
-                    
-                    # 🛡️ THE SMART GUARD: List of read-only commands anyone can ask the AI to run
                     safe_commands = [".ci", ".clubinfo", ".wl", ".wallet", ".profile", ".p", ".ml", ".marketlist", ".lb", ".leaderboard", ".taxinfo", ".ti"]
-                    
                     is_safe = any(cmd.startswith(safe_cmd) for safe_cmd in safe_commands)
 
                     if not is_safe and not ctx.author.guild_permissions.administrator:
@@ -7755,17 +7758,20 @@ async def ze_chat(ctx, *, prompt: str):
                     
                     fake_msg = copy.copy(ctx.message)
                     fake_msg.content = cmd
-                    
                     await ctx.send(f"Right away. Pulling up the files for `{cmd}`...")
                     await bot.process_commands(fake_msg)
                     return
             else:
-                # Normal Text Response
                 await ctx.send(response.text[:2000])
 
-        except Exception as e: # <--- This is the except block that went missing!
-            print(f"AI ERROR: {e}")
-            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance. Check Render logs.", 0xff0000))
+        except Exception as e:
+            # THIS WILL PRINT THE EXACT ERROR IN DISCORD
+            import traceback
+            error_msg = traceback.format_exc()
+            print(f"AI ERROR: {error_msg}", flush=True) # flush=True forces Render to show it
+            
+            # Send the raw error to Discord so we can see it
+            await ctx.send(f"**DEBUG CRASH REPORT:**\n```python\n{e}\n```")
             
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
