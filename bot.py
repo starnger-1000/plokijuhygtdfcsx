@@ -7705,7 +7705,7 @@ async def ze_chat(ctx, *, prompt: str):
         try:
             # Falling back to the ultra-stable 1.5-flash model
             model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash", 
+                model_name="gemini-2.5-flash", 
                 system_instruction=get_ai_system_prompt(),
                 tools=ai_tools
             )
@@ -7802,7 +7802,7 @@ async def ai_forum_autopilot(thread):
         prompt = f"FORUM DOUBT\nAuthor: {starter.author.name}\nHeading: {thread.name}\nDetails: {starter.content}"
         async with thread.typing():
             # <--- FIXED: Correct Model Name here as well
-            model = genai.GenerativeModel(model_name="gemini-2.0-flash", system_instruction=get_ai_system_prompt())
+            model = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=get_ai_system_prompt())
             res = await model.generate_content_async(prompt)
             await thread.send(content=f"{starter.author.mention}\n\n{res.text}", view=ForumSolveView(starter.author.id))
     except Exception as e: print(f"Forum Error: {e}")
