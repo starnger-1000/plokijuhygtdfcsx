@@ -7843,7 +7843,7 @@ class BotInfoSelect(discord.ui.Select):
             discord.SelectOption(label="Admin: Economy & Shop", emoji=discord.PartialEmoji.from_str(E_PC), description="Staff: Manage currency & items", value="admin_eco"),
             discord.SelectOption(label="Admin: Clubs & Esports", emoji=discord.PartialEmoji.from_str(E_ADMIN), description="Staff: Manage football & matches", value="admin_clubs"),
             discord.SelectOption(label="Admin: Events & System", emoji=discord.PartialEmoji.from_str(E_DANGER), description="Staff: Tournaments, wipes, polls", value="admin_sys"),
-            discord.SelectOption(label="Updates (v5.8)", emoji=discord.PartialEmoji.from_str(E_BOOST), description="View the latest patch notes", value="updates")
+            discord.SelectOption(label="Updates (v6.2)", emoji=discord.PartialEmoji.from_str(E_BOOST), description="View the latest patch notes", value="updates")
         ]
         super().__init__(placeholder="Select a category to view commands...", min_values=1, max_values=1, options=options)
 
@@ -8187,9 +8187,12 @@ class BotInfoSelect(discord.ui.Select):
             )
 
         elif cat == "updates":
-            title = f"{E_BOOST} Patch Notes v5.8"
+            title = f"{E_BOOST} Patch Notes v6.2"
             desc = (
-                f"{E_STARS} **Latest Updates**\n\n"
+                "{E_STARS} **What's New in the Kingdom?**\n\n"
+                 f"{E_STARS} **Latest Updates**\n\n"
+                f"{E_GOLD_TICK} **Ze Assistant AI:** Introducing our new Jarvis-style autonomous helper. Try `.ze`, ping the bot, or check the **#Ask-Doubts** forum!\n\n"
+                f"{E_GOLD_TICK} **Automated PC Deposits:** No more manual transfers. Use `.dpc` and the bot will track PokéTwo market listings for you.\n\n"
                 f"{E_GOLD_TICK} **Interactive Shop:** A completely new `.shop` UI utilizing dropdowns and pages.\n"
                 f"{E_GOLD_TICK} **User Market:** Players can now list their own Pokémon securely using `/sellpokemon`.\n"
                 f"{E_GOLD_TICK} **Club Taxes & Evictions:** 25% tax implemented. If unpaid after 30 days, the bot will auto-evict the owner.\n"
