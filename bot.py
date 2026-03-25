@@ -1555,93 +1555,187 @@ async def run_slots_game(interaction, host, players, wager, currency, pot):
     gamble_history_col.insert_one({"match_id": match_id, "game": "slots", "currency": currency, "total_pot": pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in players if not p['is_bot']], "results": db_results})
     await log_casino_receipt(bot, match_id)
 
-# --- ROULETTE ENGINE ---
+# --- ROULETTE ENGINE (RIGGED MULTI-STAGE EDITION) ---
 class RouletteBetView(discord.ui.View):
     def __init__(self, host, players, wager, currency, pot):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120) # Extended timeout for 3 phases
         self.host, self.players, self.wager, self.currency, self.pot = host, players, wager, currency, pot
         self.match_id = f"GMB-{str(uuid.uuid4().hex)[:6].upper()}"
-        self.bets = {} # user_id: color
+        
+        # 3-Phase Tracking
+        self.phase = "COLOR" # Moves from COLOR -> NUMBER -> EMOJI
+        humans = [p for p in self.players if not p['is_bot']]
+        self.bets = {p['id']: {"color": None, "number": None, "emoji": None} for p in humans}
+        
+        # Generate the specific options for this match
+        self.number_options = random.sample(range(0, 37), 3) # 3 random numbers
+        self.emoji_options = random.sample([E_PIKACHU, E_NYAN, E_STARS, E_FIRE, E_ITEMBOX], 3) # 3 random emojis
+        
+        self.setup_buttons()
+
+    def setup_buttons(self):
+        """Dynamically builds the buttons for the current phase"""
+        self.clear_items()
+        
+        if self.phase == "COLOR":
+            btn_b = discord.ui.Button(label="Bet BLACK", custom_id="c_BLACK", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
+            btn_r = discord.ui.Button(label="Bet RED", custom_id="c_RED", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR))
+            btn_g = discord.ui.Button(label="Bet GREEN", custom_id="c_GREEN", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ITEMBOX))
+            for b in [btn_b, btn_r, btn_g]:
+                b.callback = self.handle_bet
+                self.add_item(b)
+                
+        elif self.phase == "NUMBER":
+            for n in self.number_options:
+                btn = discord.ui.Button(label=f"Bet {n}", custom_id=f"n_{n}", style=discord.ButtonStyle.primary)
+                btn.callback = self.handle_bet
+                self.add_item(btn)
+                
+        elif self.phase == "EMOJI":
+            for i, e in enumerate(self.emoji_options):
+                btn = discord.ui.Button(label="Bet Emoji", custom_id=f"e_{i}", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(e))
+                btn.callback = self.handle_bet
+                self.add_item(btn)
+
+    async def handle_bet(self, interaction: discord.Interaction):
+        """Processes clicks and moves to the next phase if everyone is ready"""
+        uid = interaction.user.id
+        if uid not in self.bets:
+            return await interaction.response.send_message(f"{E_ERROR} You are not at this table!", ephemeral=True)
+            
+        await interaction.response.defer()
+        cid = interaction.data['custom_id']
+        
+        # Lock in the bet for the current phase
+        if self.phase == "COLOR":
+            self.bets[uid]["color"] = cid.split("_")[1]
+        elif self.phase == "NUMBER":
+            self.bets[uid]["number"] = int(cid.split("_")[1])
+        elif self.phase == "EMOJI":
+            idx = int(cid.split("_")[1])
+            self.bets[uid]["emoji"] = self.emoji_options[idx]
+            
+        await self.update_lobby(interaction)
 
     async def update_lobby(self, interaction):
-        desc = f"{E_ARROW} The Pot is **{self.pot:,} {self.currency.upper()}**.\n\n**The Table:**\n"
+        """Transforms the embed and tracks readiness"""
+        phase_keys = {"COLOR": "color", "NUMBER": "number", "EMOJI": "emoji"}
+        current_key = phase_keys[self.phase]
         humans = [p for p in self.players if not p['is_bot']]
-        all_humans_bet = True
+        
+        # Check if all humans have locked in for this specific phase
+        all_bet = all(self.bets[p['id']][current_key] is not None for p in humans)
+        
+        if all_bet:
+            if self.phase == "COLOR":
+                self.phase = "NUMBER"
+                self.setup_buttons()
+            elif self.phase == "NUMBER":
+                self.phase = "EMOJI"
+                self.setup_buttons()
+            elif self.phase == "EMOJI":
+                self.clear_items()
+                await self.spin_wheel(interaction)
+                return # Stop here, the wheel is spinning
+
+        # Build Lobby Display
+        desc = f"{E_ARROW} The Pot is **{self.pot:,} {self.currency.upper()}**.\n"
+        desc += f"**Current Phase:** Choosing {self.phase.title()}...\n\n**The Table:**\n"
         
         for p in humans:
-            if p['id'] in self.bets: desc += f"{E_SUCCESS} **{p['name']}** locked in.\n"
-            else: 
-                desc += f"{E_ACTIVE} **{p['name']}** *(Waiting...)*\n"
-                all_humans_bet = False
-                
+            if self.bets[p['id']][current_key]: desc += f"{E_SUCCESS} **{p['name']}** locked in.\n"
+            else: desc += f"{E_ACTIVE} **{p['name']}** *(Waiting...)*\n"
+            
         for p in self.players:
             if p['is_bot']: desc += f"{E_ITEMBOX} **{p['name']}** *(Waiting for humans...)*\n"
 
-        embed = discord.Embed(title="<a:Roullete_:1485553550049153065> ROULETTE: PLACE YOUR BETS", description=desc, color=0x95a5a6)
+        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: TRIPLE THREAT", description=desc, color=0x95a5a6)
         embed.set_image(url=GIF_ROULETTE)
         
         if interaction.response.is_done(): await interaction.message.edit(embed=embed, view=self)
         else: await interaction.response.edit_message(embed=embed, view=self)
 
-        if all_humans_bet:
-            self.clear_items()
-            await self.spin_wheel(interaction)
-
-    @discord.ui.button(label="Bet BLACK", style=discord.ButtonStyle.secondary, emoji=discord.PartialEmoji.from_str(E_SUCCESS))
-    async def btn_black(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. DEFER TO PREVENT TIMEOUT
-        await interaction.response.defer()
-        self.bets[interaction.user.id] = "BLACK"
-        await self.update_lobby(interaction)
-
-    @discord.ui.button(label="Bet RED", style=discord.ButtonStyle.danger, emoji=discord.PartialEmoji.from_str(E_ERROR))
-    async def btn_red(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. DEFER TO PREVENT TIMEOUT
-        await interaction.response.defer()
-        self.bets[interaction.user.id] = "RED"
-        await self.update_lobby(interaction)
-
-    @discord.ui.button(label="Bet GREEN", style=discord.ButtonStyle.success, emoji=discord.PartialEmoji.from_str(E_ITEMBOX))
-    async def btn_green(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. DEFER TO PREVENT TIMEOUT
-        await interaction.response.defer()
-        self.bets[interaction.user.id] = "GREEN"
-        await self.update_lobby(interaction)
-
     async def spin_wheel(self, interaction):
+        humans = [p for p in self.players if not p['is_bot']]
+        bots = [p for p in self.players if p['is_bot']]
+        
         # --- AT START: Deduct Wager from real wallets ---
-        for p in self.players:
-            if not p['is_bot']: 
-                await update_casino_balance(p['id'], -self.wager, self.currency)
+        for p in humans:
+            await update_casino_balance(p['id'], -self.wager, self.currency)
 
-        # Secret 80% Engine (The Opposite Bet)
-        human_reds = list(self.bets.values()).count("RED")
-        human_blacks = list(self.bets.values()).count("BLACK")
-        bot_color = "BLACK" if human_reds >= human_blacks else "RED"
+        # ==========================================
+        # 🕵️ INVISIBLE CASINO RIGGING ENGINE 
+        # ==========================================
+        num_bots = len(bots)
         
-        for p in self.players:
-            if p['is_bot']: self.bets[p['id']] = bot_color
+        # Rigging Logic: >6 bots = 95% rig. Wager >= 800k = at least 80% rig (95% if >6 bots).
+        rig_chance = 0.95 if num_bots > 6 else 0.80
+        if self.wager >= 800000:
+            rig_chance = max(rig_chance, 0.80) 
+            
+        is_rigged = random.random() < rig_chance
+        
+        all_colors = ["RED", "BLACK", "GREEN"]
+        all_combos = [(c, n, e) for c in all_colors for n in self.number_options for e in self.emoji_options]
+        human_combos = [(self.bets[h['id']]["color"], self.bets[h['id']]["number"], self.bets[h['id']]["emoji"]) for h in humans]
+        
+        if is_rigged:
+            # House wants to win. Pick a combination that NO human selected.
+            safe_combos = [c for c in all_combos if c not in human_combos]
+            winning_combo = random.choice(safe_combos) if safe_combos else random.choice(all_combos)
+        else:
+            # Let the chips fall where they may
+            winning_combo = random.choice(all_combos)
+            
+        win_color, win_num, win_emoji = winning_combo
 
-        # The 5% House Sweep
-        if random.random() < 0.05: winning_color = "GREEN"
-        else: winning_color = bot_color if random.random() < 0.80 else ("RED" if bot_color == "BLACK" else "BLACK")
-        
-        embed = discord.Embed(title="<a:Roullete_:1485553550049153065> ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
+        # --- RANDOMIZE BOT BETS DIVERSELY ---
+        for b in bots:
+            self.bets[b['id']] = {
+                "color": random.choice(all_colors),
+                "number": random.choice(self.number_options),
+                "emoji": random.choice(self.emoji_options)
+            }
+            
+        # If rigged and bots exist, manually force one bot to pick the perfect combo to "steal" the pot naturally
+        if is_rigged and bots:
+            chosen_bot = random.choice(bots)
+            self.bets[chosen_bot['id']] = {"color": win_color, "number": win_num, "emoji": win_emoji}
+
+        # ==========================================
+        # 🎬 ANIMATION PHASE
+        # ==========================================
+        embed = discord.Embed(title=f"{E_ROULETTE} ROULETTE: BETS LOCKED", description=f"{E_ARROW} The dealer is spinning the wheel...", color=0xf1c40f)
         embed.set_image(url=GIF_ROULETTE)
         await interaction.message.edit(embed=embed, view=None)
         await asyncio.sleep(2)
         
-        embed.description = f"{E_ARROW} The ball is bouncing across the numbers..."
+        embed.description = f"{E_ARROW} The ball drops onto Color: **{win_color}**!"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(2)
+
+        embed.description += f"\n{E_ARROW} It bounces into Slot Number: **{win_num}**!"
+        await interaction.message.edit(embed=embed)
+        await asyncio.sleep(2)
+
+        embed.description += f"\n{E_ARROW} The secret seal reveals Emoji: {win_emoji}!"
         await interaction.message.edit(embed=embed)
         await asyncio.sleep(2)
         
-        # Payouts
-        winners = [p for p in self.players if self.bets[p['id']] == winning_color]
-        desc = f"{E_CROWN} The ball has landed in... **{winning_color}**!\n\n"
+        # ==========================================
+        # 💰 PAYOUT LOGIC (TRIPLE MATCH REQUIRED)
+        # ==========================================
+        winners = []
+        for p in self.players:
+            bet = self.bets[p['id']]
+            if bet["color"] == win_color and bet["number"] == win_num and bet["emoji"] == win_emoji:
+                winners.append(p)
+
+        desc = f"{E_CROWN} **WINNING COMBO:** {win_color} | {win_num} | {win_emoji}\n\n"
         db_results = []
         
         if not winners:
-            desc += f"{E_ITEMBOX} **HOUSE SWEEP!** Nobody guessed {winning_color}. The Casino retains **{self.pot:,} {self.currency.upper()}**."
+            desc += f"{E_ITEMBOX} **HOUSE SWEEP!** Nobody guessed the exact combination. Casino retains **{self.pot:,}**.\n\n"
             for p in self.players:
                 db_results.append({"id": p['id'], "name": p['name'], "amount": -self.wager})
                 if not p['is_bot']: gamble_profiles_col.update_one({"user_id": str(p['id'])}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1}}, upsert=True)
@@ -1650,27 +1744,30 @@ class RouletteBetView(discord.ui.View):
             split = (self.pot - house_cut) // len(winners)
             desc += f"**{E_CROWN} THE WINNERS**\n"
             for w in winners:
-                desc += f"{E_SUCCESS} **{w['name']}** guessed {winning_color}! Wins **{split:,} {self.currency.upper()}**\n"
+                desc += f"{E_SUCCESS} **{w['name']}** hit the jackpot! Wins **{split:,} {self.currency.upper()}**\n"
                 db_results.append({"id": w['id'], "name": w['name'], "amount": split})
                 if not w['is_bot']:
-                    # --- AT END: Real Wallet Payout ---
                     await update_casino_balance(w['id'], split, self.currency)
                     gamble_profiles_col.update_one({"user_id": str(w['id'])}, {"$inc": {"net_profit": split - self.wager, "total_wagered": self.wager, "games_played": 1, "game_stats.roulette.wins": 1}}, upsert=True)
-            
-            desc += f"\n**{E_ERROR} THE LOSERS**\n"
-            for p in self.players:
+            desc += f"\n{E_ITEMBOX} **House Cut:** {house_cut:,} {self.currency.upper()}\n\n"
+
+        # Show Losers so users can see the Bots varied their bets
+        losers = [p for p in self.players if p not in winners]
+        if losers:
+            desc += f"**{E_ERROR} THE LOSERS**\n"
+            for p in losers:
+                b = self.bets[p['id']]
+                desc += f"> **{p['name']}**: {b['color']} | {b['number']} | {b['emoji']}\n"
                 if p not in winners:
-                    desc += f"{E_ERROR} **{p['name']}** guessed {self.bets[p['id']]}. *(Bust)*\n"
                     db_results.append({"id": p['id'], "name": p['name'], "amount": -self.wager})
                     if not p['is_bot']: gamble_profiles_col.update_one({"user_id": str(p['id'])}, {"$inc": {"net_profit": -self.wager, "total_wagered": self.wager, "games_played": 1}}, upsert=True)
-            
-            desc += f"\n{E_ITEMBOX} **House Cut:** {house_cut:,} {self.currency.upper()}"
 
         embed.title = f"{E_CROWN} ROULETTE: FINAL RESULTS"
         embed.description = desc
         embed.color = 0x2ecc71 if winners else 0xe74c3c
         await interaction.message.edit(embed=embed)
         
+        # Log to DB
         gamble_history_col.insert_one({"match_id": self.match_id, "game": "roulette", "currency": self.currency, "total_pot": self.pot, "timestamp": int(asyncio.get_event_loop().time()), "players": [p['id'] for p in self.players if not p['is_bot']], "results": db_results})
         await log_casino_receipt(bot, self.match_id)
 
