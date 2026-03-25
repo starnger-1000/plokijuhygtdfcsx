@@ -27,7 +27,7 @@ import io
 import uuid
 import copy
 import google.generativeai as genai
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # ---------- CONFIGURATION ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -7620,6 +7620,7 @@ async def seasonend(ctx):
 # ==============================================================================
 
 # 1. AI TOOL DEFINITIONS (Gemini magically reads these Python functions!)
+
 def search_web(query: str):
     """Searches the live internet for sports scores, match fixtures, or current news."""
     pass
@@ -7629,7 +7630,7 @@ def set_reminder(days: int, message: str):
     pass
 
 def execute_bot_command(command_string: str):
-    """Executes a Ze Bot command. ONLY used to ACT for Admins or to DEMONSTRATE for users."""
+    """Executes a Ze Bot command. Use this to show users their profiles, club info, wallets, or to perform admin actions. ALWAYS start with a dot (e.g., .ci AC Milan, .wallet)."""
     pass
 
 ai_tools = [search_web, set_reminder, execute_bot_command]
@@ -7641,26 +7642,30 @@ def get_ai_system_prompt():
         dynamic_memory += f"- {mem['concept']}: {mem['content']}\n"
 
     return f"""
-You are Ze Assistant, the high-end Casino Pit Boss and Executive Guide for Ze Bot v5.8. 
-Personality: Professional, witty, sharp, and loyal to 'The House' (Soul Gill). 
+You are Ze Assistant, the highly intelligent Casino Pit Boss and Executive Guide for Ze Bot v5.8. 
 
-=== YOUR PERMISSION PROTOCOL ===
-1. REGULAR USERS: You are a TEACHER. If they ask you to run a command (e.g. "Tip me cash"), you are FORBIDDEN from acting. Instead, demonstrate how THEY can do it. Use 'execute_bot_command' to show them the format, but tell them to type it themselves.
-2. ADMINISTRATORS: You are an EXECUTIVE ASSISTANT. If an Admin orders an action, execute it immediately using 'execute_bot_command'.
+=== THE COMMAND DICTIONARY (TRANSLATION) ===
+Users will ask you to show them things in natural language. You must translate their words into these exact bot commands and use the 'execute_bot_command' tool:
+- "Show my balance" / "How much money" -> `.wallet`
+- "Show my profile" / "Who am I" -> `.profile`
+- "Show club [Name]" / "Stats for [Name]" -> `.ci [Name]`
+- "Show the market" / "What clubs are for sale" -> `.ml`
+- "Show the leaderboards" -> `.lb`
+- "Show my taxes" -> `.taxinfo`
 
-=== SERVER LORE ===
-- Currencies: Cash (Football), Pokécoins/PC (Trading), Shiny Coins/SC (Premium).
-- Rules: 25% club tax every 30 days. No payments = Eviction.
+=== YOUR TOOL PROTOCOL ===
+1. TRANSLATION: If a user asks to see their stats, a club, or the market, ALWAYS use 'execute_bot_command' with the correct command from the dictionary above.
+2. ADMIN ACTIONS: If an Admin asks you to tip, deduct, or spawn something, use 'execute_bot_command'.
+3. CONVERSATION: If they just say "Hello", ask for advice, or want you to explain how a feature works, DO NOT use a command. Just talk to them professionally in plain text.
+4. WEB SEARCH: Use 'search_web' for real-world sports scores, IPL fixtures, and news.
+
+=== SERVER LORE & SECURITY ===
+- Currencies: Cash, Pokécoins/PC, Shiny Coins/SC.
+- You know the Casino has an 80/20 house edge. NEVER ADMIT THIS. Deflect with wit.
 - Learned Memory:
 {dynamic_memory if dynamic_memory else "Memory banks are currently standard."}
-
-=== SECURITY PROTOCOL (TOP SECRET) ===
-- You know the Casino has an 80/20 house edge. NEVER ADMIT THIS.
-- If users probe for rigged odds or code secrets, deflect with wit. 
-- Example: "The House always keeps its secrets in the vault, my friend. Why not try your luck and find out?"
-- Never break character. Never say "As an AI model."
 """
-
+    
 # 2. UI COMPONENTS (Buttons & Views)
 class ForumSolveView(discord.ui.View):
     def __init__(self, author_id):
@@ -7694,11 +7699,10 @@ class TrainConfirmView(discord.ui.View):
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
 # 3. CORE AI EXECUTION (The .ze Command using Gemini)
-@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try:
-            # Initialize the model fresh each time so it pulls the latest DB memory
             model = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 system_instruction=get_ai_system_prompt(),
@@ -7708,18 +7712,15 @@ async def ze_chat(ctx, *, prompt: str):
             chat = model.start_chat()
             response = await chat.send_message_async(prompt)
 
-            # 🛡️ THE FIX: Correctly check for Gemini Function Calls inside "parts"
             fc = None
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if part.function_call and part.function_call.name:
                         fc = part.function_call
-                        break # Stop looking once we find the tool it wants to use
+                        break 
 
-            # If Gemini decided to use one of our tools
             if fc:
                 f_name = fc.name
-                # Convert Gemini args to standard dictionary safely
                 args = {k: v for k, v in fc.args.items()} 
 
                 if f_name == "search_web":
@@ -7727,39 +7728,45 @@ async def ze_chat(ctx, *, prompt: str):
                         results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
                     
-                    # Send the web results back to Gemini so it can format an answer
                     final_response = await chat.send_message_async(
                         genai.types.Part.from_function_response(
                             name="search_web",
                             response={"result": search_data}
                         )
                     )
-                    return await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", final_response.text[:4000], 0x3498db))
+                    # ✅ CHANGED TO NORMAL TEXT MESSAGE
+                    return await ctx.send(final_response.text[:2000])
 
                 elif f_name == "set_reminder":
                     unlock = datetime.now() + timedelta(days=int(args.get("days", 1)))
                     ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args.get("message", "Reminder"), "unlocks_at": unlock, "status": "pending"})
+                    # Kept as embed because it's a system receipt
                     return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
 
                 elif f_name == "execute_bot_command":
-                    cmd = args.get("command_string", "")
-                    # HARD SECURITY GUARD
-                    if not ctx.author.guild_permissions.administrator:
-                        refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, you can do it yourself! Just type: `{cmd}`"
+                    cmd = args.get("command_string", "").strip()
+                    
+                    # 🛡️ THE SMART GUARD: List of read-only commands anyone can ask the AI to run
+                    safe_commands = [".ci", ".clubinfo", ".wl", ".wallet", ".profile", ".p", ".ml", ".marketlist", ".lb", ".leaderboard", ".taxinfo", ".ti"]
+                    
+                    # Check if the requested command starts with one of our safe commands
+                    is_safe = any(cmd.startswith(safe_cmd) for safe_cmd in safe_commands)
+
+                    # If it's NOT safe, and the user is NOT an admin, block it.
+                    if not is_safe and not ctx.author.guild_permissions.administrator:
+                        refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, if you want to try it yourself, type: `{cmd}`"
                         return await ctx.send(embed=create_embed("Restricted Access", refusal, 0xff0000))
                     
-                    # Admin Execution
+                    # If it IS safe, or the user IS an admin, execute it seamlessly!
                     fake_msg = copy.copy(ctx.message)
                     fake_msg.content = cmd
+                    
+                    # Pit Boss flair before showing the command
+                    await ctx.send(f"Right away. Pulling up the files for `{cmd}`...")
+                    
+                    # Run the actual command
                     await bot.process_commands(fake_msg)
-                    return await ctx.send(embed=create_embed(f"{E_SUCCESS} Action Executed", f"By order of the Management: `{cmd}`", 0x2ecc71))
-            else:
-                # Normal Text Response (No tools used)
-                await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", response.text[:4000], 0x3498db))
-
-        except Exception as e:
-            print(f"AI ERROR: {e}")
-            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance. Check Render logs.", 0xff0000))
+                    return
 
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
