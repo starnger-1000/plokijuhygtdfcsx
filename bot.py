@@ -7729,19 +7729,17 @@ async def ze_chat(ctx, *, prompt: str):
                 for key in fc.args:
                     args[key] = fc.args[key]
 
-                if f_name == "search_web":
+               elif f_name == "search_web":
                     with DDGS() as ddgs:
                         results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
                     
+                    # 🛡️ THE FIX: Send the results back using the correct dictionary format
                     final_response = await chat.send_message_async(
-                        genai.types.Part.from_function_response(
-                            name="search_web",
-                            response={"result": search_data}
-                        )
+                        {"function_response": {"name": "search_web", "response": {"result": search_data}}}
                     )
                     return await ctx.send(final_response.text[:2000])
-
+                   
                 elif f_name == "set_reminder":
                     unlock = datetime.now() + timedelta(days=int(args.get("days", 1)))
                     ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args.get("message", "Reminder"), "unlocks_at": unlock, "status": "pending"})
