@@ -7763,13 +7763,17 @@ async def ze_chat(ctx, *, prompt: str):
                 await ctx.send(response.text[:2000])
 
         except Exception as e:
-            # THIS WILL PRINT THE EXACT ERROR IN DISCORD
-            import traceback
-            error_msg = traceback.format_exc()
-            print(f"AI ERROR: {error_msg}", flush=True) # flush=True forces Render to show it
+            error_str = str(e).lower()
             
-            # Send the raw error to Discord so we can see it
-            await ctx.send(f"**DEBUG CRASH REPORT:**\n```python\n{e}\n```")
+            # If we hit Google's 20-message speed limit
+            if "429" in error_str or "quota" in error_str:
+                await ctx.send("⏳ **The Pit Boss is busy!** Too many people are talking to me right now. Please wait about 15 seconds and try your request again.")
+            else:
+                # If it's a real bug, print the debug info
+                import traceback
+                error_msg = traceback.format_exc()
+                print(f"AI ERROR: {error_msg}", flush=True) 
+                await ctx.send(f"**DEBUG CRASH REPORT:**\n```python\n{e}\n```")
             
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
