@@ -7848,9 +7848,9 @@ class BotInfoSelect(discord.ui.Select):
         super().__init__(placeholder="Select a category to view commands...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        cat = self.values[0]
+        cat = self.values[0] # This has 8 spaces
         
-       if cat == "home":
+        if cat == "home":    # This MUST also have 8 spaces
             title = f"{E_CROWN} **Welcome to the Ze Bot Ecosystem**"
             desc = (
                 f"Ze Bot is a custom-built, high-stakes management engine designed to bridge the gap between "
@@ -7867,7 +7867,7 @@ class BotInfoSelect(discord.ui.Select):
                 f"{E_SHINY} **Shiny Coins (SC):** Premium currency for the Admin Shop and rare assets.\n\n"
                 f"{E_ACTIVE} *Use the dropdown menu to explore every command available to you.*"
             )
-
+            
         elif cat == "economy":
             title = f"{E_MONEY} Economy & Banking"
             desc = (
