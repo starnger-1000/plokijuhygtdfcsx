@@ -1,6 +1,6 @@
 # bot.py 
 # Full Club Auction & Pokémon Shop Bot (Certified Final Production Build v6.2)
-# Part 1 of 4 - Core, Config, Events, Economy & Groups  
+# Part 1 of 4 - Core, Config, Events, Economy & Groups   
 # Dependencies: discord.py, pymongo, dnspython, certifi
 
 import os
@@ -7740,7 +7740,7 @@ async def ze_chat(ctx, *, prompt: str):
             
             # Request generation from Groq's Llama 3 model
             response = await groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 tools=groq_tools,
                 tool_choice="auto"
@@ -7769,7 +7769,7 @@ async def ze_chat(ctx, *, prompt: str):
                     })
                     
                     final_response = await groq_client.chat.completions.create(
-                        model="llama3-70b-8192",
+                        model="llama-3.3-70b-versatile",
                         messages=messages
                     )
                     return await ctx.send(final_response.choices[0].message.content[:2000])
@@ -7836,7 +7836,7 @@ async def ai_forum_autopilot(thread):
         async with thread.typing():
             # Groq Llama 3 generation
             response = await groq_client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": get_ai_system_prompt()},
                     {"role": "user", "content": prompt}
