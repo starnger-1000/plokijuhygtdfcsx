@@ -7704,7 +7704,7 @@ async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try: # <--- The try block starts here
             model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-2.0-flash",
                 system_instruction=get_ai_system_prompt(),
                 tools=ai_tools
             )
@@ -7774,9 +7774,13 @@ async def ai_auto_listener(message):
     
     is_ping = bot.user.mentioned_in(message) or "<@&1450896057495064628>" in message.content
     is_reply = False
-    if message.reference:
-        ref = await message.channel.fetch_message(message.reference.message_id)
-        if ref.author.id == bot.user.id: is_reply = True
+    
+    if message.reference and message.reference.message_id:
+        try:
+            ref = await message.channel.fetch_message(message.reference.message_id)
+            if ref.author.id == bot.user.id: is_reply = True
+        except discord.NotFound:
+            pass # <--- FIXED: If a user replies to a deleted message, the bot safely ignores it.
 
     if is_ping or is_reply:
         clean = message.content.replace(f"<@!{bot.user.id}>", "").replace(f"<@{bot.user.id}>", "").replace("<@&1450896057495064628>", "").strip()
@@ -7791,7 +7795,8 @@ async def ai_forum_autopilot(thread):
         starter = await thread.fetch_message(thread.id)
         prompt = f"FORUM DOUBT\nAuthor: {starter.author.name}\nHeading: {thread.name}\nDetails: {starter.content}"
         async with thread.typing():
-            model = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=get_ai_system_prompt())
+            # <--- FIXED: Correct Model Name here as well
+            model = genai.GenerativeModel(model_name="gemini-2.0-flash", system_instruction=get_ai_system_prompt())
             res = await model.generate_content_async(prompt)
             await thread.send(content=f"{starter.author.mention}\n\n{res.text}", view=ForumSolveView(starter.author.id))
     except Exception as e: print(f"Forum Error: {e}")
