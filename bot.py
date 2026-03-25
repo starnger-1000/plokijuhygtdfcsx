@@ -27,8 +27,6 @@ import io
 import uuid
 import copy
 import google.generativeai as genai
-import json
-import copy
 from duckduckgo_search import DDGS
 
 # ---------- CONFIGURATION ----------
