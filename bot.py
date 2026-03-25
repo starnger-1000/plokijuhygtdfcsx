@@ -7694,11 +7694,11 @@ class TrainConfirmView(discord.ui.View):
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
 # 3. CORE AI EXECUTION (The .ze Command using Gemini)
-@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
         try:
-            # We initialize the model fresh each time so it pulls the latest DB memory
+            # Initialize the model fresh each time so it pulls the latest DB memory
             model = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 system_instruction=get_ai_system_prompt(),
@@ -7708,15 +7708,23 @@ async def ze_chat(ctx, *, prompt: str):
             chat = model.start_chat()
             response = await chat.send_message_async(prompt)
 
-            # Check if Gemini decided to use one of our tools
-            if response.function_call:
-                fc = response.function_call
+            # 🛡️ THE FIX: Correctly check for Gemini Function Calls inside "parts"
+            fc = None
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.function_call and part.function_call.name:
+                        fc = part.function_call
+                        break # Stop looking once we find the tool it wants to use
+
+            # If Gemini decided to use one of our tools
+            if fc:
                 f_name = fc.name
-                args = {k: v for k, v in fc.args.items()} # Convert Gemini args to standard dictionary
+                # Convert Gemini args to standard dictionary safely
+                args = {k: v for k, v in fc.args.items()} 
 
                 if f_name == "search_web":
                     with DDGS() as ddgs:
-                        results = [r for r in ddgs.text(args["query"], max_results=3)]
+                        results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
                     
                     # Send the web results back to Gemini so it can format an answer
@@ -7729,12 +7737,12 @@ async def ze_chat(ctx, *, prompt: str):
                     return await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", final_response.text[:4000], 0x3498db))
 
                 elif f_name == "set_reminder":
-                    unlock = datetime.now() + timedelta(days=int(args["days"]))
-                    ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args["message"], "unlocks_at": unlock, "status": "pending"})
+                    unlock = datetime.now() + timedelta(days=int(args.get("days", 1)))
+                    ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args.get("message", "Reminder"), "unlocks_at": unlock, "status": "pending"})
                     return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
 
                 elif f_name == "execute_bot_command":
-                    cmd = args["command_string"]
+                    cmd = args.get("command_string", "")
                     # HARD SECURITY GUARD
                     if not ctx.author.guild_permissions.administrator:
                         refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, you can do it yourself! Just type: `{cmd}`"
@@ -7746,7 +7754,7 @@ async def ze_chat(ctx, *, prompt: str):
                     await bot.process_commands(fake_msg)
                     return await ctx.send(embed=create_embed(f"{E_SUCCESS} Action Executed", f"By order of the Management: `{cmd}`", 0x2ecc71))
             else:
-                # Normal Text Response
+                # Normal Text Response (No tools used)
                 await ctx.send(embed=create_embed(f"{E_STARS} Ze Assistant", response.text[:4000], 0x3498db))
 
         except Exception as e:
