@@ -7699,10 +7699,10 @@ class TrainConfirmView(discord.ui.View):
             await interaction.response.edit_message(embed=create_embed("Neural Wipe", f"Memory erased: **{self.concept}**", 0xff0000), view=self)
 
 # 3. CORE AI EXECUTION (The .ze Command using Gemini)
-@bot.command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
+@bot.hybrid_command(name="ze", aliases=["askze", "jarvis"], description="Consult the Casino Pit Boss.")
 async def ze_chat(ctx, *, prompt: str):
     async with ctx.typing():
-        try:
+        try: # <--- The try block starts here
             model = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 system_instruction=get_ai_system_prompt(),
@@ -7734,13 +7734,11 @@ async def ze_chat(ctx, *, prompt: str):
                             response={"result": search_data}
                         )
                     )
-                    # ✅ CHANGED TO NORMAL TEXT MESSAGE
                     return await ctx.send(final_response.text[:2000])
 
                 elif f_name == "set_reminder":
                     unlock = datetime.now() + timedelta(days=int(args.get("days", 1)))
                     ai_reminders_col.insert_one({"user_id": str(ctx.author.id), "channel_id": str(ctx.channel.id), "message": args.get("message", "Reminder"), "unlocks_at": unlock, "status": "pending"})
-                    # Kept as embed because it's a system receipt
                     return await ctx.send(embed=create_embed(f"{E_TIMER} Reminder Logged", f"I've noted that in the books for <t:{int(unlock.timestamp())}:f>.", 0x2ecc71))
 
                 elif f_name == "execute_bot_command":
@@ -7749,25 +7747,26 @@ async def ze_chat(ctx, *, prompt: str):
                     # 🛡️ THE SMART GUARD: List of read-only commands anyone can ask the AI to run
                     safe_commands = [".ci", ".clubinfo", ".wl", ".wallet", ".profile", ".p", ".ml", ".marketlist", ".lb", ".leaderboard", ".taxinfo", ".ti"]
                     
-                    # Check if the requested command starts with one of our safe commands
                     is_safe = any(cmd.startswith(safe_cmd) for safe_cmd in safe_commands)
 
-                    # If it's NOT safe, and the user is NOT an admin, block it.
                     if not is_safe and not ctx.author.guild_permissions.administrator:
                         refusal = f"I'm afraid I can't pull those levers for you, my friend. That's a Staff-only action. However, if you want to try it yourself, type: `{cmd}`"
                         return await ctx.send(embed=create_embed("Restricted Access", refusal, 0xff0000))
                     
-                    # If it IS safe, or the user IS an admin, execute it seamlessly!
                     fake_msg = copy.copy(ctx.message)
                     fake_msg.content = cmd
                     
-                    # Pit Boss flair before showing the command
                     await ctx.send(f"Right away. Pulling up the files for `{cmd}`...")
-                    
-                    # Run the actual command
                     await bot.process_commands(fake_msg)
                     return
+            else:
+                # Normal Text Response
+                await ctx.send(response.text[:2000])
 
+        except Exception as e: # <--- This is the except block that went missing!
+            print(f"AI ERROR: {e}")
+            await ctx.send(embed=create_embed("System Offline", f"{E_ERROR} My neural net is currently in maintenance. Check Render logs.", 0xff0000))
+            
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
 async def ai_auto_listener(message):
