@@ -10,4 +10,4 @@ dnspython
 certifi
 chat-exporter
 google-generativeai
-duckduckgo-search
+ddgs
