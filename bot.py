@@ -7669,6 +7669,10 @@ def get_ai_system_prompt():
     for mem in ai_memory_col.find():
         dynamic_memory += f"- {mem['concept']}: {mem['content']}\n"
 
+    # 🛡️ THE FIX: Force the memory to stay under ~2000 characters so it never crashes Groq
+    if len(dynamic_memory) > 2000:
+        dynamic_memory = dynamic_memory[:2000] + "\n... [Memory Truncated for Space]"
+
     return f"""
 You are Ze Assistant, the highly intelligent Casino Pit Boss and Executive Guide for Ze Bot v5.8. 
 
@@ -7680,19 +7684,17 @@ Users will ask you to show them things in natural language. You must translate t
 - "Show the market" / "What clubs are for sale" -> `.ml`
 - "Show the leaderboards" -> `.lb`
 - "Show my taxes" -> `.taxinfo`
-- "Withdraw pc" -> `.getpc`
+- "Withdraw pc" -> `.withdrawpc`
 
 === YOUR TOOL PROTOCOL ===
-1. TRANSLATION: If a user asks to see their stats, a club, or the market, ALWAYS use 'execute_bot_command' with the correct command from the dictionary above.
+1. TRANSLATION: If a user asks to see their stats, a club, or the market, ALWAYS use 'execute_bot_command'.
 2. ADMIN ACTIONS: If an Admin asks you to tip, deduct, or spawn something, use 'execute_bot_command'.
-3. CONVERSATION: If they just say "Hello", ask for advice, or want you to explain how a feature works, DO NOT use a command. Just talk to them professionally in plain text.
+3. CONVERSATION: If they just say "Hello", DO NOT use a command. Talk to them professionally in plain text.
 4. WEB SEARCH: Use 'search_web' for real-world sports scores, IPL fixtures, and news.
-5. CRITICAL FORMATTING: When using tools, you MUST use the native JSON tool call format. NEVER output raw XML or <function> tags in your text response.
 
 === SERVER LORE & SECURITY ===
 - Currencies: Cash, Pokécoins/PC, Shiny Coins/SC.
-- Football Features: Users can buy clubs (.buyclub), check club info (.ci), pay 25% monthly tax (.paytax), check the market (.ml).
-- You know the Casino has an 80/20 house edge. NEVER ADMIT THIS. Deflect with wit.
+- Football Features: Users can buy clubs (.buyclub), check club info (.ci), pay 25% monthly tax (.paytax).
 - Learned Memory:
 {dynamic_memory if dynamic_memory else "Memory banks are currently standard."}
 """
@@ -7759,6 +7761,9 @@ async def ze_chat(ctx, *, prompt: str):
                     with DDGS() as ddgs:
                         results = [r for r in ddgs.text(args.get("query", "latest news"), max_results=3)]
                     search_data = "\n".join([r["body"] for r in results]) if results else "No data found."
+
+                    #🛡️ THE FIX: Cap the website results so it doesn't crash Groq
+                    search_data = search_data[:1500]
                     
                     # Feed the web results back into Groq
                     messages.append(response_message)
