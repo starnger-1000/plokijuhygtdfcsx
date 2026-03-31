@@ -8440,24 +8440,34 @@ async def auto_giveaway_quest(payload):
 #  RENDER PORT BINDING (Fix for "No open ports detected")
 # ==============================================================================
 
+# --- THE FIX: Threaded Startup Sequence ---
 app = FastAPI()
 
 @app.get("/")
-def read_root():
-    return {"Status": "Bot is Online!"}
+def home():
+    return {"status": "Pit Boss is alive and dealing."}
 
 def run_web_server():
-    # Render assigns a specific PORT, we must listen to it
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    """Runs the dummy web server to keep Render happy."""
+    import uvicorn
+    # Use the port Render assigns, or default to 10000
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
 if __name__ == "__main__":
-    # 1. Start the fake web server in the background
-    t = threading.Thread(target=run_web_server)
-    t.start()
+    # 1. Start the web server in a background thread so it doesn't block the code
+    web_thread = threading.Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
     
-    # 2. Start the Discord Bot
-    bot.run(DISCORD_TOKEN)
+    print("Web server started in background. Waking up the Pit Boss...")
+    
+    # 2. Start the Discord Bot on the main thread
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("CRITICAL ERROR: No DISCORD_TOKEN found in Environment Variables!")
+    else:
+        bot.run(token)
 
 
 
