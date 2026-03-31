@@ -7812,7 +7812,9 @@ async def ze_chat(ctx, *, prompt: str):
 # 4. LISTENERS (Auto-Replies & Forum Autopilot)
 @bot.listen('on_message')
 async def ai_auto_listener(message):
-    if message.author.bot: return
+    # 🛡️ THE FIX: If the message is from the bot itself, ignore it completely!
+    if message.author == bot.user:
+        return
     
     is_ping = bot.user.mentioned_in(message) or "<@&1450896057495064628>" in message.content
     is_reply = False
