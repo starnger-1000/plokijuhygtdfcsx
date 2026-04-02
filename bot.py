@@ -7815,7 +7815,12 @@ async def ai_auto_listener(message):
     # 🛡️ THE FIX: If the message is from the bot itself, ignore it completely!
     if message.author == bot.user:
         return
-    
+
+    # (Optional but recommended): If this listener is meant to reply to users, 
+    # make sure it only triggers if the bot is actually mentioned!
+    if bot.user not in message.mentions and not message.reference:
+        return
+        
     is_ping = bot.user.mentioned_in(message) or "<@&1450896057495064628>" in message.content
     is_reply = False
     
